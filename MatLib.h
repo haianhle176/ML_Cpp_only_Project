@@ -5,6 +5,7 @@
 #include <string>
 #include <chrono>
 #include <cmath>
+#include <iomanip>
 using namespace std;
 using namespace std::chrono;
 
@@ -29,6 +30,7 @@ struct Mat {
     const int size() const;
     void rand(float min_val = -1.0f, float max_val = 1.0f);
     void print() const;
+    void savetxt(const string& filename) const;
     Mat& loadmat(const string& filename);
     Mat& operator=(const Mat& other);
     Mat& operator+=(const Mat& other);
@@ -100,22 +102,31 @@ void UpdateParameters(const Mat& dsrc, const Mat& src, Mat& dst, float learning_
 void ReLU(const Mat& src, Mat& dst);
 void dReLU(const Mat& cmp, const Mat& src, Mat& dst);
 void Sigmoid(const Mat& src, Mat& dst);
+void Softmax(const Mat& src, Mat& dst);
 void Hadamard(const Mat& src1, const Mat& src2, Mat& dst);
 void Hadamard(const float* src1, const float* src2, float* dst,int n);
 void Element_Wise_Div(const Mat& src1, const Mat& src2, Mat& dst);
 void Hadamard_Broadcast_Row(const Mat& src1, const Mat& src2, Mat& dst);
 void Sum_Rows(const Mat& src, Mat& dst);
+void Sum_Cols(const Mat& src, Mat& dst);
+inline void Copy_Vec(const float* src, float* dst,int n) {std::copy(src, src + n, dst);}
 
 
 float MSE(const Mat& Y, const Mat& Z);
 float MAE(const Mat& Y, const Mat& Z);
-float BCE(const Mat& Y, const Mat& Z);
-float MSE(const Mat& Y, const Mat& Z, string regularization = "none", float lambda = 0.0f, const Mat& W = Mat());
-float MAE(const Mat& Y, const Mat& Z, string regularization = "none", float lambda = 0.0f, const Mat& W = Mat());
-float BCE(const Mat& Y, const Mat& Z, string regularization = "none", float lambda = 0.0f, const Mat& W = Mat());
+float BCE(const Mat& Y, const Mat& P);
+float CCE(const Mat& Y, const Mat& P);
+float MSE(const Mat& Y, const Mat& Z, string regularization, float lambda, const Mat& W);
+float MAE(const Mat& Y, const Mat& Z, string regularization, float lambda, const Mat& W);
+float BCE(const Mat& Y, const Mat& P, string regularization, float lambda, const Mat& W);
+float Loss_Cal(const Mat& Y, const Mat& Y_hat, string loss_type);
+
+float CCE(const Mat& Y, const Mat& P, string regularization, float lambda, const Mat& W);
 float VIF_Cal(const float* X,const float *X_pred ,float X_mean,int n);
 void VIF(const Mat& X, Mat& VIF_mat);
 void ShowVIF(const Mat& X);
+void ModelEvaluation(const Mat& Y_true, const Mat& Y_pred, string loss_type, float threshold = 0.5f);
+
 inline void Forward_Pass_ReLU(const Mat& X, const vector<Mat>& W, const vector<Mat>& B, vector<Mat>& Z, vector<Mat>& A, string type){
     for (size_t l = 0; l < W.size(); l++) {
         if (l == 0) {
@@ -128,14 +139,33 @@ inline void Forward_Pass_ReLU(const Mat& X, const vector<Mat>& W, const vector<M
         // Layer cuối cùng không dùng ReLU
         if (l == W.size() - 1) {
             if (type == "BCE") Sigmoid(Z[l], A[l]);
+            else if (type == "CCE") Softmax(Z[l],  A[l]);
             else A[l] = Z[l]; // Giữ nguyên tuyến tính cho MSE/MAE
         } else {
             ReLU(Z[l], A[l]);
         }
     }
 }
-
-// Hàm dùng cho Inference
+inline void Forward_Pass_ReLU(const Mat& X, const vector<Mat>& W, const vector<Mat>& B, vector<Mat>& Z, vector<Mat>& A, vector<Mat>& Mask, string type){
+    for (size_t l = 0; l < W.size(); l++) {
+        if (l == 0) {
+            mxm(X, W[0], Z[0]);
+        } else {
+            mxm(A[l - 1], W[l], Z[l]);
+        }
+        Z[l] += B[l];
+        
+        // Layer cuối cùng không dùng ReLU
+        if (l == W.size() - 1) {
+            if (type == "BCE") Sigmoid(Z[l], A[l]);
+            else if (type == "CCE") Softmax(Z[l],  A[l]);
+            else A[l] = Z[l]; // Giữ nguyên tuyến tính cho MSE/MAE
+        } else {
+            ReLU(Z[l], A[l]);
+            Hadamard(A[l], Mask[l], A[l]);
+        }
+    }
+}
 inline void Forward_Pass_ReLU(const Mat& X, const vector<Mat>& W, const vector<Mat>& B, Mat& Y_Pred, string type){
     vector<Mat> A(W.size());
     vector<Mat> Z(W.size());
@@ -150,6 +180,7 @@ inline void Forward_Pass_ReLU(const Mat& X, const vector<Mat>& W, const vector<M
         
         if (l == W.size() - 1) {
             if (type == "BCE") Sigmoid(Z[l], Y_Pred);
+            else if (type == "CCE") Softmax(Z[l], Y_Pred);
             else Y_Pred = Z[l];
         } else {
             ReLU(Z[l], A[l]);
@@ -175,29 +206,62 @@ inline void Backward_Pass_ReLU(const Mat& X, const Mat& Y, vector<Mat>& W, vecto
         Sum_Rows(dA[l], dB[l]);
     }
 }
+inline void Backward_Pass_ReLU(const Mat& X, const Mat& Y,const vector<Mat>& W,const vector<Mat>& Z,const vector<Mat>& A,vector <Mat>& dA,
+     vector<Mat>& dW, vector<Mat>& dB, vector<Mat>& Mask, string loss_type){
+    if (loss_type=="MAE"){
+        apply(A.back(), Y, dA.back(), [](float a, float y) { return (float)(a - y > 0) - (float)(a - y < 0);});
+    }
+    else apply(A.back(), Y, dA.back(), [](float a, float y) { return a - y;});
+    if (W.size() >= 2) mtxm(A[W.size()-2], dA.back(), dW[W.size()-1]);
+    else mtxm(X, dA.back(), dW[W.size()-1]);
+    Sum_Rows(dA.back(), dB.back());
+    for (int l = W.size() - 2; l >= 0; l--) {
+        mxmt(dA[l + 1], W[l + 1], dA[l]);
+        Hadamard(dA[l], Mask[l], dA[l]);
+        dReLU(Z[l], dA[l], dA[l]);
+        if (l > 0) {
+            mtxm(A[l - 1], dA[l], dW[l]);
+        } else {
+            mtxm(X, dA[l], dW[l]);
+        }
+        Sum_Rows(dA[l], dB[l]);
+    }
+}
 void RandNormal(vector<float>& dst, float mu, float sigma);
 float RandUni(float a,float b);
-
+void RandBer(vector<float>& dst, float p_keep);
 static time_point<high_resolution_clock> start, stop;
 void StartTimer();
 void StopTimer();
 void PrintTimer();
+void ShowSoftmaxPredict(const Mat& Y_Pred, const Mat& Y_Test);
+int EarlyStop(const Mat& X_Val, const Mat& Y_Val, vector <Mat>& W,vector <Mat>& B, string loss_type , int patience, int epoch);
 
-void FeatureScaling(const Mat& src, Mat& dst, Mat& mean_mat, Mat& std_mat, string type = "standard");
+void FeatureScaling(const Mat& src, Mat& dst, Mat& mean_mat, Mat& std_mat, string loss_type = "standard");
+void FeatureScaling(Mat& dst, Mat& mean_mat, Mat& inv_std_mat);
 void Rescale_Weight(Mat& W, Mat& B, Mat& mean_mat, Mat& inv_std_mat);
-void Rescale_Y(Mat& Y_Pred, Mat& Y_mean, Mat& Y_std);
+void Rescale_Y(Mat& Y_Pred, Mat& Y_mean, Mat& Y_inv_std);
 void Train_LN(const Mat& X, const Mat& Y, Mat& W, Mat& B, float learning_rate, int epochs, Loss_History& history, string loss_type,
      string regularization = "none", float lambda = 0.0f);
 void Train_LN(const Mat& X, const Mat& Y, Mat& W, Mat& B, float learning_rate, int epochs, string loss_type);
 void Train_LG_BIN(const Mat& X, const Mat& Y, Mat& W, Mat& B, float learning_rate, int epochs, Loss_History& history,
      string regularization = "none", float lambda = 0.0f);
 void Train_MLP(const Mat& X, const Mat& Y, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate, int epochs, Loss_History& history,
-     string loss_type , float epsilon = 1e-6, string regularization = "none", float lambda = 0.0f);
+     string loss_type , string regularization = "none", float lambda = 0.0f);
+void Train_MLP(const Mat& X, const Mat& Y, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate, int epochs, Loss_History& history,
+     string loss_type, float pkeep, int batch_size);
+void Train_MLP(const Mat& X, const Mat& Y, const Mat& X_Val, const Mat& Y_Val, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate,
+     int epochs, Loss_History& history, string loss_type, float pkeep, int batch_size);
 void LinearRegression(Mat& X, Mat& Y, Mat& W, Mat& B, float learning_rate, int epochs, Loss_History& history,
      string loss_type , string regularization = "none", float lambda = 0.0f);
 void LogisticRegression_Binary(Mat& X, Mat& Y, Mat& W, Mat& B, float learning_rate, int epochs, Loss_History& history,
      string regularization = "none", float lambda = 0.0f);
 void MLP(Mat& X, Mat& Y, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate, int epochs, Loss_History& history,
-     string loss_type , float epsilon = 1e-6, string regularization = "none", float lambda = 0.0f);
+     string loss_type , string regularization = "none", float lambda = 0.0f);
+void MLP(Mat& X, Mat& Y, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate, int epochs, Loss_History& history,
+     string loss_type , float pkeep, int batch_size);
+void MLP(Mat& X, Mat& Y, Mat& X_Val, Mat& Y_Val, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate,
+     int epochs, Loss_History& history, string loss_type , float pkeep, int batch_size);
 
+     
 #endif

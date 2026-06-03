@@ -1,6 +1,5 @@
 #include "MatLib.h"
 #include <immintrin.h>
-#include <omp.h>
 #include <random>
 #include <utility>
 #include <algorithm>
@@ -115,6 +114,29 @@ void Mat::print() const{
         }
         cout << endl;
     }
+}
+void Mat::savetxt(const string& filename) const {
+    ofstream outfile(filename);
+    
+    // Kiểm tra xem file có mở thành công không
+    if (!outfile.is_open()) {
+        cerr << "Error: Could not open file " << filename << " for writing." << endl;
+        return;
+    }
+
+    // Ghi kích thước ma trận ở dòng đầu tiên (để sau này loadmat đọc lại được)
+    outfile << row << " " << col << "\n";
+
+    // Ghi dữ liệu ma trận, mỗi hàng xuống dòng 1 lần cho dễ đọc bằng mắt thường
+    for (int i = 0; i < row; i++) {
+        for (int j = 0; j < col; j++) {
+            outfile << (*this)(i, j) << " ";
+        }
+        outfile << "\n";
+    }
+
+    outfile.close();
+    cout << "Da luu ma tran vao file text: " << filename << endl;
 }
 Mat& Mat::loadmat(const string& txtFilename) {
     string binFilename = txtFilename.substr(0, txtFilename.find_last_of('.')) + ".bin";
@@ -757,6 +779,21 @@ void dReLU(const Mat& cmp, const Mat& src, Mat& dst){
 void Sigmoid(const Mat& src, Mat& dst){
     apply(src, dst, [](float x) { return 1.0f / (1.0f + expf(-x)); });
 }
+void Softmax(const Mat& src, Mat& dst){
+    for (int i = 0; i < src.row; i++){
+        float max_val = src(i, 0);
+        float sum = 0.0f;
+        for(int j = 1; j < src.col; j++)
+            if(src(i, j) > max_val) max_val = src(i, j);
+        for(int j = 0; j < src.col; j++){
+            dst(i, j) = expf(src(i, j) - max_val);
+            sum += dst(i, j);
+        }
+        float inv_sum = 1.0f / sum;
+        for(int j = 0; j < src.col; j++)
+            dst(i, j) *= inv_sum;
+    }
+}
 void Hadamard(const Mat& src1, const Mat& src2, Mat& dst) {
     apply(src1, src2, dst, [](float a, float b) { return a * b; });
 }
@@ -775,10 +812,6 @@ void Hadamard_Broadcast_Row(const Mat& src1, const Mat& src2, Mat& dst) {
     apply_broadcast_row(src1, src2, dst, [](float a, float b) { return a * b; });
 }
 void Sum_Rows(const Mat& src, Mat& dst){
-    if (src.col != dst.col || dst.row != 1) {
-        cerr << "Error: Incompatible dimensions for Sum_Rows." << endl;
-        return;
-    }
     // Bắt buộc phải reset các phần tử của dst về 0 trước khi cộng dồn
     dst.set_zeros(); 
     // Quét qua từng hàng (sample)
@@ -786,70 +819,111 @@ void Sum_Rows(const Mat& src, Mat& dst){
         vector_add(dst.data.data(),src.data.data() + i * src.col, dst.data.data(), src.col);
     }
 }
+void Sum_Cols(const Mat& src, Mat& dst){
+    for (int i = 0; i < src.row ; i++){
+        dst.data[i] = sum_elements(src.data.data() + i * src.col,src.col);
+    } 
+}
+float Precision(float TP, float FP){
+    if (TP + FP == 0) return 0.0f;
+    else return (float)TP/(TP + FP);
+}
+float Recall(float TP, float FN){
+    if (TP + FN == 0) return 0.0f;
+    else return (float)TP/(TP + FN);
+}
+float F1_Score(float precision, float recall){
+    if (precision + recall == 0) return 0.0f;
+    else return 2 * precision * recall / (precision + recall);
+}
 float MSE(const Mat& Y, const Mat& Z) {
-    return dist(Y.data.data(), Z.data.data(), Y.size()) / (2 * Y.size());
+    return dist(Y.data.data(), Z.data.data(), Y.size()) / (2 * Y.row);
 }
 float MAE(const Mat& Y, const Mat& Z) {
-    return sum_elements_abs(Y.data.data(), Z.data.data(), Y.size()) / Y.size();
+    return sum_elements_abs(Y.data.data(), Z.data.data(), Y.size()) / Y.row;
 }
-float BCE(const Mat& Y, const Mat& Z) {
-    size_t size = Z.size();
+float BCE(const Mat& Y, const Mat& P) {
+    size_t size = Y.size();
     const float* y_ptr = Y.data.data();
-    const float* z_ptr = Z.data.data();
+    const float* p_ptr = P.data.data();
     double total_loss = 0.0;
     for (size_t i = 0; i < size; ++i) {
-        float z = z_ptr[i];
-        float y = y_ptr[i];
-        float max_val = (z > 0.0f) ? z : 0.0f; 
-        total_loss += max_val - z * y + logf(1.0f + expf(-abs(z)));
+        total_loss += y_ptr[i] * logf(p_ptr[i] + 1e-7f) + (1 - y_ptr[i]) * logf(1 - p_ptr[i] + 1e-7f) ;
     }
-    return static_cast<float>(total_loss / size);
+    return static_cast<float>(total_loss / Y.row);
 }
-float MSE(const Mat& Error, string regularization , float lambda  , const Mat& W){
-    if (regularization == "L1") {
-        return dot(Error.data.data(), Error.data.data(), Error.size()) / (2 * Error.size()) + lambda * sum_elements_abs(W.data.data(), W.size());
+float CCE(const Mat& Y, const Mat& P){
+    const float* y_ptr = Y.data.data();
+    const float* p_ptr = P.data.data();
+    double total_loss = 0.0;
+    for (int i = 0; i < Y.row; i++) {
+        for (int j = 0; j < Y.col; j++) {
+            if (y_ptr[i * Y.col + j] > 0.0f)
+                total_loss -= y_ptr[i * Y.col + j] * logf(p_ptr[i * P.col + j] + 1e-7f);
+        }
     }
-    else if (regularization == "L2") {
-        return dot(Error.data.data(), Error.data.data(), Error.size()) / (2 * Error.size()) + lambda * dot(W.data.data(), W.data.data(), W.size());
-    }
-    return dot(Error.data.data(), Error.data.data(), Error.size()) / (2 * Error.size());
+    return static_cast<float>(total_loss / Y.row);
 }
 float MSE(const Mat& Y, const Mat& Z, string regularization , float lambda, const Mat& W) {
     if (regularization == "L1") {
-        return dist(Y.data.data(), Z.data.data(), Y.size()) / (2 * Y.size()) + lambda * sum_elements_abs(W.data.data(), W.size());
+        return dist(Y.data.data(), Z.data.data(), Y.size()) / (2 * Y.row) + lambda * sum_elements_abs(W.data.data(), W.size()) / Y.row;
     }
     else if (regularization == "L2") {
-        return dist(Y.data.data(), Z.data.data(), Y.size()) / (2 * Y.size()) + lambda * dot(W.data.data(), W.data.data(), W.size());
+        return dist(Y.data.data(), Z.data.data(), Y.size()) / (2 * Y.row) + 0.5f * lambda * dot(W.data.data(), W.data.data(), W.size()) / Y.row;
     }
-    return dist(Y.data.data(), Z.data.data(), Y.size()) / (2 * Y.size());
+    return dist(Y.data.data(), Z.data.data(), Y.size()) / (2 * Y.row);
 }
 float MAE(const Mat& Y, const Mat& Z, string regularization , float lambda, const Mat& W) {
     if (regularization == "L1") {
-        return sum_elements_abs(Y.data.data(), Z.data.data(), Y.size()) / Y.size() + lambda * sum_elements_abs(W.data.data(), W.size());
+        return sum_elements_abs(Y.data.data(), Z.data.data(), Y.size()) / Y.row + lambda * sum_elements_abs(W.data.data(), W.size()) / Y.row;
     }
     else if (regularization == "L2") {
-        return sum_elements_abs(Y.data.data(), Z.data.data(), Y.size()) / Y.size() + lambda * dot(W.data.data(), W.data.data(), W.size());
+        return sum_elements_abs(Y.data.data(), Z.data.data(), Y.size()) / Y.row + 0.5f * lambda * dot(W.data.data(), W.data.data(), W.size()) / Y.row;
     }
-    return sum_elements_abs(Y.data.data(), Z.data.data(), Y.size()) / Y.size();
+    return sum_elements_abs(Y.data.data(), Z.data.data(), Y.size()) / Y.row;
 }
-float BCE(const Mat& Y, const Mat& Z, string regularization , float lambda, const Mat& W) {
-    size_t size = Z.size();
+float BCE(const Mat& Y, const Mat& P, string regularization , float lambda, const Mat& W) {
+    size_t size = Y.size();
     const float* y_ptr = Y.data.data();
-    const float* z_ptr = Z.data.data();
+    const float* p_ptr = P.data.data();
     double total_loss = 0.0;
     for (size_t i = 0; i < size; ++i) {
-        float z = z_ptr[i];
-        float y = y_ptr[i];
-        float max_val = (z > 0.0f) ? z : 0.0f; 
-        total_loss += max_val - z * y + logf(1.0f + expf(-abs(z)));
+        total_loss += y_ptr[i] * logf(p_ptr[i] + 1e-7f) + (1 - y_ptr[i]) * logf(1 - p_ptr[i] - 1e-7f) ;
     }
+    return static_cast<float>(total_loss / Y.row);
     if (regularization == "L1") {
-        total_loss += lambda * sum_elements_abs(W.data.data(), W.size());
+        total_loss += lambda * sum_elements_abs(W.data.data(), W.size()) / Y.row;
     }
     else if (regularization == "L2") {
-        total_loss += lambda * dot(W.data.data(), W.data.data(), W.size());
+        total_loss += 0.5f * lambda * dot(W.data.data(), W.data.data(), W.size()) / Y.row;
     }
-    return static_cast<float>(total_loss / size);
+    return static_cast<float>(total_loss / Y.row);
+}
+float CCE(const Mat& Y, const Mat& P, string regularization, float lambda, const Mat& W){
+    const float* y_ptr = Y.data.data();
+    const float* p_ptr = P.data.data();
+    double total_loss = 0.0;
+    for (int i = 0; i < Y.row; i++) {
+        for (int j = 0; j < Y.col; j++) {
+            if (y_ptr[i * Y.col + j] > 0.0f)
+                total_loss -= y_ptr[i * Y.col + j] * logf(p_ptr[i * P.col + j] + 1e-7f);
+        }
+    }
+    if (regularization == "L1") {
+        total_loss += lambda * sum_elements_abs(W.data.data(), W.size()) / Y.row;
+    }
+    else if (regularization == "L2") {
+        total_loss += 0.5f * lambda * dot(W.data.data(), W.data.data(), W.size()) / Y.row;
+    }
+    return static_cast<float>(total_loss / Y.row);
+}
+float Loss_Cal(const Mat& Y, const Mat& Y_hat, string loss_type){
+    float val;
+    if (loss_type == "MSE") val = MSE(Y, Y_hat);
+    else if (loss_type == "MAE") val = MAE(Y, Y_hat);
+    else if (loss_type == "BCE") val = BCE(Y, Y_hat);
+    else if (loss_type == "CCE") val = CCE(Y, Y_hat);
+    return val;
 }
 float VIF_Cal(const float* X_true,const float *X_pred ,float X_mean,int n){
     float RSS, TSS;
@@ -893,6 +967,52 @@ void ShowVIF(const Mat& X){
         cout << "Feature " << i << ": " << VIF_mat(0, i) << endl;
     }
 }
+void ModelEvaluation(const Mat& Y_true, const Mat& Y_pred, string loss_type, float threshold){
+    if (loss_type == "BCE" || loss_type == "CCE"){
+        float precision , recall , f1;
+        float macro_precision = 0, macro_recall = 0, macro_f1 = 0;
+        Mat Y_hat (Y_pred.row,Y_pred.col);
+        Mat ConfusionMat(Y_pred.col, Y_pred.col);
+        if (loss_type == "BCE") apply(Y_pred, Y_hat, [threshold](float x) {return (x > threshold) ? 1.0f : 0.0f;});
+        else {
+            for (int i = 0; i < Y_hat.row; i++) {
+		        int pred_class = 0;
+                for (int j = 1; j < Y_hat.col; j++) if (Y_pred(i, j) > Y_pred(i, pred_class)) pred_class = j;
+                Y_hat(i,pred_class) = 1.0f; 
+            }
+            for (int i = 0;i < Y_true.row;i++){
+                int idx_ytrue = -1, idx_yhat = -1;
+                for (int j = 0;j < Y_true.col; j++){
+                    if (Y_true(i,j)) idx_ytrue = j;
+                    if (Y_hat(i,j)) idx_yhat = j;
+                    if (idx_yhat != -1 && idx_ytrue != -1) break;
+                }
+                ConfusionMat(idx_ytrue , idx_yhat)++;
+            }
+            int total_sum = sum_elements(ConfusionMat.data.data(), ConfusionMat.size());
+            Mat soc (1, ConfusionMat.row);Sum_Cols(ConfusionMat,soc);
+            Mat sor (1, ConfusionMat.col);Sum_Rows(ConfusionMat,sor);
+            for (int i = 0; i < ConfusionMat.row; i++){
+                int tp = (int)ConfusionMat(i,i);
+                int fp = sor.data[i] - tp;
+                int fn = soc.data[i] - tp;
+                int tn = total_sum - tp - fp - fn;
+                precision = Precision(tp, fp); macro_precision += precision;
+                recall = Recall(tp, fn); macro_recall += recall;
+                f1 = F1_Score(precision, recall); macro_f1 += f1;
+            }
+            cout << "\nMacro Precision: " << (float)macro_precision / ConfusionMat.row << endl;
+            cout << "Macro Recall: " << (float)macro_recall / ConfusionMat.row << endl;
+            cout << "Macro F1-Score: " << (float)macro_f1 / ConfusionMat.row << endl;
+        }
+    }
+    else if (loss_type == "MSE" || loss_type == "MAE"){
+        float mse = MSE(Y_true, Y_pred);
+        float mae = MAE(Y_true, Y_pred);
+        cout << "\nRoot Mean Squared Error: " << sqrtf(2* mse) << endl;
+        cout << "Mean Absolute Error: " << mae << endl;
+    }
+}
 void RandNormal(vector<float>& src, float mu, float sigma){
     static std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());
     static std::normal_distribution<float> dis(mu, sigma);
@@ -902,18 +1022,84 @@ void RandNormal(vector<float>& src, float mu, float sigma){
         src[i] = dis(gen);
     }
 }
+void RandBer(vector<float>& dst, float p_keep){
+    static std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    uniform_real_distribution<float> dist(0.0f, 1.0f);
+    float scale = 1.0f/p_keep;
+    for (size_t i = 0; i < dst.size(); ++i) {
+        dst[i] = (dist(gen) < p_keep) ? scale : 0.0f;
+    }
+}
 float RandUni(float a, float b){
     static std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());
     uniform_real_distribution<float> dis(a, b);
     return dis(gen);
 }
 void StartTimer(){start = high_resolution_clock::now();}
-void StopTimer(){stop = high_resolution_clock::now();}
+void StopTimer(){stop = high_resolution_clock::now();} 
 void PrintTimer() {
     auto duration = duration_cast<milliseconds>(stop - start);
     cout << "\nThoi gian thuc thi: " << duration.count() << " ms" << endl;
 }
-void FeatureScaling(const Mat& src, Mat& dst, Mat& mean_mat, Mat& std_mat, string type) {
+void ShowSoftmaxPredict(const Mat& Y_Pred, const Mat& Y_Test){
+    cout << "\nSample  Predicted  Exact  Probabilities:\n";
+	int cnt = 0;
+	for (int i = 0; i < Y_Pred.row; i++) {
+		int pred_class = 0;
+		for (int j = 1; j < Y_Pred.col; j++)
+			if (Y_Pred(i, j) > Y_Pred(i, pred_class)) pred_class = j;
+
+		int true_class = 0;
+		for (int j = 1; j < Y_Test.col; j++)
+			if (Y_Test(i, j) > Y_Test(i, true_class)) true_class = j;
+		if (pred_class == true_class) cnt++;
+		cout << "  [" << i << "]  pred=" << pred_class << "  true=" << true_class << "  prob=[";
+		for (int j = 0; j < Y_Pred.col; j++) {
+			cout << fixed << setprecision(3) << Y_Pred(i, j);
+			if (j < Y_Pred.col - 1) cout << ", ";
+		}
+		cout << "]" << (pred_class == true_class ? "  OK" : "  X") << "\n";
+	}
+	cout << "\nCorrect Predictions: " << cnt << "/" << Y_Test.row << " (" << 100.0f * cnt / Y_Test.row << "%)\n";
+}
+int EarlyStop(const Mat& X_Val, const Mat& Y_Val, vector <Mat>& W,vector <Mat>& B, string loss_type, int patience, int epoch){
+    static int wait_count = 0;
+    static float best_val_loss = 1e9f;
+    static Mat Y_Pred;
+    static vector <Mat> Best_W;
+    static vector <Mat> Best_B;
+    if (epoch == 0){
+        wait_count = 0;
+        best_val_loss = 1e9f;
+        Y_Pred = Mat(Y_Val.row, Y_Val.col);
+        Best_W.resize(W.size());
+        Best_B.resize(B.size());
+    }
+    Forward_Pass_ReLU(X_Val, W, B, Y_Pred, loss_type);
+    float current_val_loss = Loss_Cal(Y_Val, Y_Pred, loss_type);
+    if (current_val_loss < best_val_loss) {
+            // Lập kỷ lục mới -> Reset bộ đếm và backup trọng số
+            best_val_loss = current_val_loss;
+            wait_count = 0;
+        for(size_t i = 0; i < W.size(); i++) {
+            Best_W[i] = W[i];
+            Best_B[i] = B[i];
+        }
+    }
+    else {
+        wait_count++;
+        if (wait_count >= patience){
+            cout << "\n[Early Stopping]";
+            for(size_t i = 0; i < W.size(); i++) {
+                W[i] = Best_W[i];
+                B[i] = Best_B[i];
+            }
+            return 1;        
+        }
+    }
+    return 0;
+}
+void FeatureScaling(const Mat& src, Mat& dst, Mat& mean_mat, Mat& std_mat, string loss_type) {
     if (&src == &dst) {
         Mat Temp(src.col, src.row);
         src.transpose(Temp);
@@ -934,6 +1120,10 @@ void FeatureScaling(const Mat& src, Mat& dst, Mat& mean_mat, Mat& std_mat, strin
     dst -= mean_mat;
     Hadamard_Broadcast_Row(dst, std_mat, dst);
 }
+void FeatureScaling(Mat& dst, Mat& mean_mat, Mat& inv_std_mat){
+    dst -= mean_mat;
+    Hadamard_Broadcast_Row(dst, inv_std_mat, dst);
+}
 void Rescale_Weight(Mat& W, Mat& B, Mat& mean_mat, Mat& inv_std_mat){
     W.transpose();
     Mat Temp(1, W.row);
@@ -945,10 +1135,10 @@ void Rescale_Weight(Mat& W, Mat& B, Mat& mean_mat, Mat& inv_std_mat){
     W.transpose();
     B -= Temp;
 }
-void Rescale_Y(Mat& Y_Pred, Mat& Y_mean, Mat& Y_std){
+void Rescale_Y(Mat& Y_Pred, Mat& Y_mean, Mat& Y_inv_std){
     for (int i = 0; i < Y_Pred.row; i++) {
         for (int j = 0; j < Y_Pred.col; j++) {
-            Y_Pred(i, j) = (Y_Pred(i, j) / Y_std(0, j)) + Y_mean(0, j); 
+            Y_Pred(i, j) = (Y_Pred(i, j) / Y_inv_std(0, j)) + Y_mean(0, j); 
         }
     }
 }
@@ -961,7 +1151,6 @@ void Train_LN(const Mat& X, const Mat& Y, Mat& W, Mat& B, float learning_rate, i
     Mat ones = Mat::ones(Y.row, 1);
     float alpha = learning_rate / static_cast<float>(x_row);
     float parameter_scaling = 1.0f - lambda * alpha;
-    float lamda_scaled = lambda / (2 * static_cast<float>(x_row));
     if(loss_type == "MSE"){
         for (int epoch = 0; epoch < epochs; epoch++) {
             mxm(X, W, Y_pred);
@@ -1030,12 +1219,11 @@ void Train_LG_BIN(const Mat& X, const Mat& Y, Mat& W, Mat& B, float learning_rat
     Mat ones = Mat::ones(Y.row, 1);
     float alpha = learning_rate / static_cast<float>(x_row);
     float parameter_scaling = 1.0f - lambda * alpha;
-    float lamda_scaled = lambda / (2 * static_cast<float>(x_row));
     for (int epoch = 0; epoch < epochs; epoch++) {
             mxm(X, W, Z);
             Z += B;
-            history.save(BCE(Y, Z, regularization, lambda, W));
             Sigmoid(Z, Z);
+            history.save(BCE(Y, Z, regularization, lambda, W));
             Z-= Y;
             mtxm(X, Z, dW);
             mtxm(ones, Z, dB);
@@ -1044,29 +1232,27 @@ void Train_LG_BIN(const Mat& X, const Mat& Y, Mat& W, Mat& B, float learning_rat
     }
 }
 void Train_MLP(const Mat& X, const Mat& Y, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate, int epochs, Loss_History& history,
-     string loss_type, float epsilon, string regularization, float lambda){
-    vector <Mat> Z(W.size());
-    vector <Mat> A(W.size());
-    for(size_t i = 0; i < W.size(); i++){
-        Z[i] = Mat(X.row, W[i].col);
-        A[i] = Mat(X.row, W[i].col);
-    }
+     string loss_type, string regularization, float lambda){
+    // Init dW, dB truoc de W duoc cap nhat dung kich thuoc
     vector <Mat> dW(W.size());
     vector <Mat> dB(B.size());
-    vector <Mat> dA(W.size());
-    for (size_t i = 0; i < dA.size(); i++) dA[i] = Mat(A[i].row, A[i].col);
     Init_Node(dW, dB, hidden_nodes, X.col, Y.col);
+    // Init Z, A, dA sau khi W da co dung kich thuoc
+    vector <Mat> Z(W.size());
+    vector <Mat> A(W.size());
+    vector <Mat> dA(W.size());
+    for(size_t i = 0; i < W.size(); i++){
+        Z[i]  = Mat(X.row, W[i].col);
+        A[i]  = Mat(X.row, W[i].col);
+        dA[i] = Mat(X.row, W[i].col);
+    }
     Mat ones = Mat::ones(Y.row, 1);
     float alpha = learning_rate / static_cast<float>(X.row);
     float parameter_scaling = 1.0f - lambda * alpha;
-    float lamda_scaled = lambda / (2 * static_cast<float>(X.row));
     if (loss_type == "MSE") {
         for (int epoch = 0; epoch < epochs; epoch++) {
             Forward_Pass_ReLU(X, W, B, Z, A, "MSE");
             history.save(MSE(Y, A.back(), regularization, lambda, W.back()));
-            if (epoch > 1 && fabs(history.Loss.back() - history.Loss[history.Loss.size() - 2]) < epsilon) {
-                break;
-            }
             Backward_Pass_ReLU(X, Y, W, Z, A, dA, dW, dB, loss_type);
             for (size_t i = 0; i < W.size(); i++) {
                 UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
@@ -1077,9 +1263,6 @@ void Train_MLP(const Mat& X, const Mat& Y, vector<Mat>& W, vector<Mat>& B, vecto
         for (int epoch = 0; epoch < epochs; epoch++) {
             Forward_Pass_ReLU(X, W, B, Z, A, "MAE");
             history.save(MAE(Y, A.back(), regularization, lambda, W.back()));
-            if (epoch > 1 && fabs(history.Loss.back() - history.Loss[history.Loss.size() - 2]) < epsilon) {
-                break;
-            }
             Backward_Pass_ReLU(X, Y, W, Z, A, dA, dW, dB, loss_type);
             for (size_t i = 0; i < W.size(); i++) {
                 UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
@@ -1091,9 +1274,6 @@ void Train_MLP(const Mat& X, const Mat& Y, vector<Mat>& W, vector<Mat>& B, vecto
         for (int epoch = 0; epoch < epochs; epoch++) {
             Forward_Pass_ReLU(X, W, B, Z, A, "BCE");
             history.save(BCE(Y, Z.back(), regularization, lambda, W.back()));
-            if (epoch > 1 && fabs(history.Loss.back() - history.Loss[history.Loss.size() - 2]) < epsilon) {
-                break;
-            }
             Backward_Pass_ReLU(X, Y, W, Z, A, dA, dW, dB, loss_type);
             for (size_t i = 0; i < W.size(); i++) {
                 UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
@@ -1101,8 +1281,200 @@ void Train_MLP(const Mat& X, const Mat& Y, vector<Mat>& W, vector<Mat>& B, vecto
             }
         }
     }
-     else {
-        cerr << "Error: Unsupported loss type. Use 'MSE', 'MAE' or 'BCE'." << endl;
+    else if (loss_type == "CCE") {
+        for (int epoch = 0; epoch < epochs; epoch++) {
+            Forward_Pass_ReLU(X, W, B, Z, A, "CCE");
+            history.save(CCE(Y, A.back(), regularization, lambda, W.back()));
+            Backward_Pass_ReLU(X, Y, W, Z, A, dA, dW, dB, loss_type);
+            for (size_t i = 0; i < W.size(); i++) {
+                UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
+                UpdateParameters(dB[i], B[i], B[i], alpha);
+            }
+        }
+    }
+}
+void Train_MLP(const Mat& X, const Mat& Y, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate, int epochs, Loss_History& history,
+     string loss_type, float pkeep, int batch_size){
+    // Init dW, dB truoc de W duoc cap nhat dung kich thuoc
+    int X_mini_size = X.row/batch_size;
+    vector <Mat> X_mini (X_mini_size);
+    vector <Mat> Y_mini (X_mini_size);
+    for (int b = 0 ; b < X_mini_size ;b++){
+        X_mini[b] = Mat(batch_size,X.col);
+        Y_mini[b] = Mat(batch_size,Y.col);
+        Copy_Vec(X.data.data() + b * batch_size * X.col, X_mini[b].data.data(),batch_size * X.col);
+        Copy_Vec(Y.data.data() + b * batch_size * Y.col, Y_mini[b].data.data(),batch_size * Y.col);
+    }
+    vector <Mat> dW(W.size());
+    vector <Mat> dB(B.size());
+    Init_Node(dW, dB, hidden_nodes, X.col, Y.col);
+    vector <Mat> Z(W.size());
+    vector <Mat> A(W.size());
+    vector <Mat> dA(W.size());
+    vector <Mat> Mask(W.size() - 1);
+    for(size_t i = 0; i < W.size(); i++){
+        Z[i]  = Mat(batch_size, W[i].col);
+        A[i]  = Mat(batch_size, W[i].col);
+        dA[i] = Mat(batch_size, W[i].col);
+        if (i > 0) Mask[i - 1] = Mat(batch_size, W[i - 1].col);
+    }
+    Mat ones = Mat::ones(Y.row, 1);
+    float alpha = learning_rate / static_cast<float>(batch_size);
+    float parameter_scaling = 1.0f;
+    if (loss_type == "MSE") {
+        for (int epoch = 0; epoch < epochs; epoch++) {
+            for (int b = 0 ; b < X_mini_size ;b++){
+                for(size_t i = 0; i < W.size() - 1; i++)RandBer(Mask[i].data, pkeep);
+                Forward_Pass_ReLU(X_mini[b], W, B, Z, A, Mask, loss_type);
+                history.save(MSE(Y_mini[b], A.back()));
+                Backward_Pass_ReLU(X_mini[b], Y_mini[b], W, Z, A, dA, dW, dB, Mask, loss_type);
+                for (size_t i = 0; i < W.size(); i++) {
+                    UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
+                    UpdateParameters(dB[i], B[i], B[i], alpha);
+                }
+            }
+        }
+    } else if (loss_type == "MAE") {
+        for (int epoch = 0; epoch < epochs; epoch++) {
+            for (int b = 0 ; b < X_mini_size ;b++){
+                for(size_t i = 0; i < W.size() - 1; i++)RandBer(Mask[i].data, pkeep);
+                Forward_Pass_ReLU(X_mini[b], W, B, Z, A, Mask, loss_type);
+                history.save(MAE(Y_mini[b], A.back()));
+                Backward_Pass_ReLU(X_mini[b], Y_mini[b], W, Z, A, dA, dW, dB, Mask, loss_type);
+                for (size_t i = 0; i < W.size(); i++) {
+                    UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
+                    UpdateParameters(dB[i], B[i], B[i], alpha);
+                }
+            }
+        }
+    }
+    else if (loss_type == "BCE") {
+        for (int epoch = 0; epoch < epochs; epoch++) {
+            for (int b = 0 ; b < X_mini_size ;b++){
+                for(size_t i = 0; i < W.size() - 1; i++)RandBer(Mask[i].data, pkeep);
+                Forward_Pass_ReLU(X_mini[b], W, B, Z, A, Mask, loss_type);
+                history.save(BCE(Y_mini[b], A.back()));
+                Backward_Pass_ReLU(X_mini[b], Y_mini[b], W, Z, A, dA, dW, dB, Mask, loss_type);
+                for (size_t i = 0; i < W.size(); i++) {
+                    UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
+                    UpdateParameters(dB[i], B[i], B[i], alpha);
+                }
+            }
+        }
+    }
+    else if (loss_type == "CCE") {
+        for (int epoch = 0; epoch < epochs; epoch++) {
+            for (int b = 0 ; b < X_mini_size ;b++){
+                for(size_t i = 0; i < W.size() - 1; i++)RandBer(Mask[i].data, pkeep);
+                Forward_Pass_ReLU(X_mini[b], W, B, Z, A, Mask, loss_type);
+                history.save(CCE(Y_mini[b], A.back()));
+                Backward_Pass_ReLU(X_mini[b], Y_mini[b], W, Z, A, dA, dW, dB, Mask, loss_type);
+                for (size_t i = 0; i < W.size(); i++) {
+                    UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
+                    UpdateParameters(dB[i], B[i], B[i], alpha);
+                }
+            }
+        }
+    }
+}
+void Train_MLP(const Mat& X, const Mat& Y, const Mat& X_Val, const Mat& Y_Val, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate,
+     int epochs, Loss_History& history, string loss_type, float pkeep, int batch_size){
+    // Init dW, dB truoc de W duoc cap nhat dung kich thuoc
+    int X_mini_size = X.row/batch_size;
+    vector <Mat> X_mini (X_mini_size);
+    vector <Mat> Y_mini (X_mini_size);
+    for (int b = 0 ; b < X_mini_size ;b++){
+        X_mini[b] = Mat(batch_size,X.col);
+        Y_mini[b] = Mat(batch_size,Y.col);
+        Copy_Vec(X.data.data() + b * batch_size * X.col, X_mini[b].data.data(),batch_size * X.col);
+        Copy_Vec(Y.data.data() + b * batch_size * Y.col, Y_mini[b].data.data(),batch_size * Y.col);
+    }
+    vector <Mat> dW(W.size());
+    vector <Mat> dB(B.size());
+    Init_Node(dW, dB, hidden_nodes, X.col, Y.col);
+    vector <Mat> Z(W.size());
+    vector <Mat> A(W.size());
+    vector <Mat> dA(W.size());
+    vector <Mat> Mask(W.size() - 1);
+    for(size_t i = 0; i < W.size(); i++){
+        Z[i]  = Mat(batch_size, W[i].col);
+        A[i]  = Mat(batch_size, W[i].col);
+        dA[i] = Mat(batch_size, W[i].col);
+        if (i > 0) Mask[i - 1] = Mat(batch_size, W[i - 1].col);
+    }
+    Mat ones = Mat::ones(Y.row, 1);
+    float alpha = learning_rate / static_cast<float>(batch_size);
+    float parameter_scaling = 1.0f;int patience = 15;
+    if (loss_type == "MSE") {
+        for (int epoch = 0; epoch < epochs; epoch++) {
+            for (int b = 0 ; b < X_mini_size ;b++){
+                for(size_t i = 0; i < W.size() - 1; i++)RandBer(Mask[i].data, pkeep);
+                Forward_Pass_ReLU(X_mini[b], W, B, Z, A, Mask, loss_type);
+                Backward_Pass_ReLU(X_mini[b], Y_mini[b], W, Z, A, dA, dW, dB, Mask, loss_type);
+                for (size_t i = 0; i < W.size(); i++) {
+                    UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
+                    UpdateParameters(dB[i], B[i], B[i], alpha);
+                }
+            }
+            history.save(MSE(Y_mini[X_mini_size - 1], A.back()));
+            if (EarlyStop(X_Val, Y_Val, W, B, loss_type, patience, epoch)) {
+                for (int k = 0; k < patience;k++)history.Loss.pop_back();
+                break; 
+            }
+        }
+    } else if (loss_type == "MAE") {
+        for (int epoch = 0; epoch < epochs; epoch++) {
+            for (int b = 0 ; b < X_mini_size ;b++){
+                for(size_t i = 0; i < W.size() - 1; i++)RandBer(Mask[i].data, pkeep);
+                Forward_Pass_ReLU(X_mini[b], W, B, Z, A, Mask, loss_type);
+                Backward_Pass_ReLU(X_mini[b], Y_mini[b], W, Z, A, dA, dW, dB, Mask, loss_type);
+                for (size_t i = 0; i < W.size(); i++) {
+                    UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
+                    UpdateParameters(dB[i], B[i], B[i], alpha);
+                }
+            }
+            history.save(MAE(Y_mini[X_mini_size - 1], A.back()));
+            if (EarlyStop(X_Val, Y_Val, W, B, loss_type, patience, epoch)) {
+                for (int k = 0; k < patience;k++)history.Loss.pop_back();
+                break; 
+            }
+        }
+    }
+    else if (loss_type == "BCE") {
+        for (int epoch = 0; epoch < epochs; epoch++) {
+            for (int b = 0 ; b < X_mini_size ;b++){
+                for(size_t i = 0; i < W.size() - 1; i++)RandBer(Mask[i].data, pkeep);
+                Forward_Pass_ReLU(X_mini[b], W, B, Z, A, Mask, loss_type);
+                Backward_Pass_ReLU(X_mini[b], Y_mini[b], W, Z, A, dA, dW, dB, Mask, loss_type);
+                for (size_t i = 0; i < W.size(); i++) {
+                    UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
+                    UpdateParameters(dB[i], B[i], B[i], alpha);
+                }
+            }
+            history.save(BCE(Y_mini[X_mini_size - 1], A.back()));
+            if (EarlyStop(X_Val, Y_Val, W, B, loss_type, patience, epoch)) {
+                for (int k = 0; k < patience;k++)history.Loss.pop_back();
+                break; 
+            }
+        }
+    }
+    else if (loss_type == "CCE") {
+        for (int epoch = 0; epoch < epochs; epoch++) {
+            for (int b = 0 ; b < X_mini_size ;b++){
+                for(size_t i = 0; i < W.size() - 1; i++)RandBer(Mask[i].data, pkeep);
+                Forward_Pass_ReLU(X_mini[b], W, B, Z, A, Mask, loss_type);
+                Backward_Pass_ReLU(X_mini[b], Y_mini[b], W, Z, A, dA, dW, dB, Mask, loss_type);
+                for (size_t i = 0; i < W.size(); i++) {
+                    UpdateParameters(dW[i], W[i], W[i], alpha, parameter_scaling);
+                    UpdateParameters(dB[i], B[i], B[i], alpha);
+                }
+            }
+            history.save(CCE(Y_mini[X_mini_size - 1], A.back()));
+            if (EarlyStop(X_Val, Y_Val, W, B, loss_type, patience, epoch)) {
+                for (int k = 0; k < patience;k++)history.Loss.pop_back();
+                break; 
+            }
+        }
     }
 }
 void LinearRegression(Mat& X, Mat& Y, Mat& W, Mat& B, float learning_rate, int epochs, Loss_History& history, string loss_type,
@@ -1122,7 +1494,7 @@ void LogisticRegression_Binary(Mat& X, Mat& Y, Mat& W, Mat& B, float learning_ra
     Rescale_Weight(W, B, mean_mat, std_mat);
 }
 void MLP(Mat& X, Mat& Y, vector<Mat>& W, vector<Mat>& B,vector <int> hidden_nodes,float learning_rate, int epochs, Loss_History& history,
-     string loss_type ,float epsilon, string regularization, float lambda){
+     string loss_type, string regularization, float lambda){
     Init_Node(W, B, hidden_nodes, X.col, Y.col);
     for (size_t i = 0; i < W.size(); i++) {
         RandNormal(W[i].data, 0.0f, sqrtf(2.0f / W[i].row));
@@ -1130,6 +1502,31 @@ void MLP(Mat& X, Mat& Y, vector<Mat>& W, vector<Mat>& B,vector <int> hidden_node
     }
     Mat X_mean_mat(1, X.col), X_std_mat(1, X.col);
     FeatureScaling(X, X, X_mean_mat, X_std_mat, "standard");
-    Train_MLP(X, Y, W, B, hidden_nodes, learning_rate, epochs, history, loss_type, epsilon, regularization, lambda);
+    Train_MLP(X, Y, W, B, hidden_nodes, learning_rate, epochs, history, loss_type, regularization, lambda);
     Rescale_Weight(W[0], B[0], X_mean_mat, X_std_mat);
+}
+void MLP(Mat& X, Mat& Y, vector<Mat>& W, vector<Mat>& B,vector <int> hidden_nodes,float learning_rate, int epochs, Loss_History& history,
+     string loss_type, float pkeep, int batch_size){
+    Init_Node(W, B, hidden_nodes, X.col, Y.col);
+    for (size_t i = 0; i < W.size(); i++) {
+        RandNormal(W[i].data, 0.0f, sqrtf(2.0f / W[i].row));
+        B[i].set_zeros();
+    }
+    Mat X_mean_mat(1, X.col), X_std_mat(1, X.col);
+    FeatureScaling(X, X, X_mean_mat, X_std_mat, "standard");
+    Train_MLP(X, Y, W, B, hidden_nodes, learning_rate, epochs, history, loss_type, pkeep, batch_size);
+    Rescale_Weight(W[0], B[0], X_mean_mat, X_std_mat);
+}
+void MLP(Mat& X, Mat& Y, Mat& X_Val, Mat& Y_Val, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate,
+     int epochs, Loss_History& history, string loss_type , float pkeep, int batch_size){
+    Init_Node(W, B, hidden_nodes, X.col, Y.col);
+    for (size_t i = 0; i < W.size(); i++) {
+        RandNormal(W[i].data, 0.0f, sqrtf(2.0f / W[i].row));
+        B[i].set_zeros();
+    }
+    Mat X_mean_mat(1, X.col), X_std_mat(1, X.col);
+    FeatureScaling(X, X, X_mean_mat, X_std_mat, "standard");
+    FeatureScaling(X_Val, X_mean_mat, X_std_mat);
+    Train_MLP(X, Y, X_Val, Y_Val, W, B, hidden_nodes, learning_rate, epochs, history, loss_type, pkeep, batch_size);
+    Rescale_Weight(W[0], B[0], X_mean_mat, X_std_mat);        
 }

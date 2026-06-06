@@ -7,8 +7,10 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <algorithm>
 #include <string>
 #include <vector>
+#include <random>
 using namespace std;
 using namespace std::chrono;
 
@@ -50,6 +52,15 @@ struct Loss_History {
     void print();
     void print_final();
 };
+struct TreeNode{
+    int feature_idx;       // Chỉ số của đặc trưng (cột) được chọn để chia
+    float threshold;       // Ngưỡng chia (điểm cắt)
+    TreeNode* left;        // Nhánh trái (<= threshold)
+    TreeNode* right;       // Nhánh phải (> threshold)
+    float leaf_value;        // Giá trị dự đoán nếu là nút lá
+    bool is_leaf;
+    TreeNode() : feature_idx(-1), threshold(0.0f), left(nullptr), right(nullptr), leaf_value(-1.0f), is_leaf(false) {}
+};
 
 class MLP {
 public:
@@ -67,8 +78,8 @@ public:
     Mat Y_std;
 
     MLP(const vector<int>& hidden_nodes = {}, const string& loss_type = "MSE",
-        const string& regularization = "", float lambda = 0.0f,
-        float pkeep = 1.0f, int batch_size = 0);
+        float pkeep = 1.0f, int batch_size = 0,
+        const string& regularization = "", float lambda = 0.0f);
 
     void fit(const Mat& X, const Mat& Y, float learning_rate, int epochs, Loss_History& history);
     void fit_with_valid(const Mat& X, const Mat& Y, const Mat& X_val, const Mat& Y_val,
@@ -86,6 +97,63 @@ private:
                                Mat& Y_val_scaled);
 };
 
+class DecisionTree {
+    private:
+        int max_depth;
+        int min_samples_split;
+        string type;
+        TreeNode* root;
+        float epsilon, min_impurity_decrease;
+        int num_class;
+        float gini_cal(const Mat&Y);
+        float varience_cal(const Mat&Y);
+        float gini_cal(const Mat&Y, vector <int>& sample_indices);
+        float varience_cal(const Mat&Y, vector <int>& sample_indices);
+        float gini_cal(const vector<int>& count, int total_samples);
+        void split_dataset(const Mat& X, const Mat& Y, int split_pos, int feature_idx,
+             float threshold, Mat& X_left, Mat& Y_left, Mat& X_right, Mat& Y_right);
+        void find_best_split_clf(const Mat& X, const Mat&Y, vector<int>& idx, vector <int>& count_left, vector <int>& count_right,
+             int f, int& best_feature, float& best_threshold, float& best_gini, int& best_split_pos);
+        void find_best_split_reg(const Mat& X, const Mat& Y, vector<int>& idx, int f, int& best_feature, float& best_threshold,
+             float& best_variance, int& best_split_pos);
+        float get_majority(const Mat& Y);
+        float get_majority(const Mat& Y, vector <int>& sample_indices);
+        float predict_single(const float* X, TreeNode* node) const;
+        TreeNode* build_tree(const Mat&X, const Mat& Y, int depth);
+        TreeNode* build_forest(const Mat&X, const Mat& Y, int depth, vector<int>& sample_indices, vector<int>& feature_indices);
+    public:
+        DecisionTree(string type, int max_depth = 5, int min_samples_split = 3, int num_class = 0)
+        : type(type), max_depth(max_depth), min_samples_split(min_samples_split), root(nullptr),
+         epsilon(1e-3), min_impurity_decrease(1e-4), num_class(num_class){}
+        void fit(const Mat& X, const Mat& Y);
+        Mat predict(const Mat& X) const;
+        float predict(const float* X) const;
+        void evaluate(const Mat& Y_true, const Mat& Y_pred) const;
+        float evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const;
+        void k_fold(const Mat& X, const Mat& Y, int K, bool shuffle);
+        void fit_forest(const Mat& X, const Mat& Y, vector<int>& sample_indices, vector<int>& feature_indices);
+};
+
+class RandomForest{
+    private:
+        int num_trees;
+        int max_depth;
+        int min_samples_split;
+        int num_features_split;
+        string type;
+        int num_classes;
+        vector<DecisionTree> forest;
+        vector<int> _bootstrap(int num_samples, std::mt19937& gen);
+    public:
+        RandomForest(string type, int num_trees = 100, int max_depth = 10, int min_samples_split = 2)
+        :type(type), num_trees(num_trees), max_depth(max_depth), min_samples_split(min_samples_split){}
+        void fit(const Mat& X, const Mat& Y);
+        Mat predict(const Mat& X) const;
+        float predict_single(const float* X) const;
+        void evaluate(const Mat& Y_true, const Mat& Y_pred) const;
+        float evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const;
+        void k_fold(const Mat& X, const Mat& Y, int K, bool shuffle);
+};
 class LinearRegression {
 public:
     Mat W;
@@ -135,6 +203,8 @@ public:
     void evaluate(const Mat& Y_true, const Mat& Y_pred, float threshold = 0.5f) const;
     float evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type, float threshold = 0.5f) const;
 };
+
+
 void mxm(const Mat& src1, const Mat& src2, Mat& dst);
 void mxm_block_tilt(const Mat& src1, const Mat& src2, Mat& dst);
 void mtxm(const Mat& src1, const Mat& src2, Mat& dst);
@@ -199,7 +269,7 @@ void Hadamard_Broadcast_Row(const Mat& src1, const Mat& src2, Mat& dst);
 void Sum_Rows(const Mat& src, Mat& dst);
 void Sum_Cols(const Mat& src, Mat& dst);
 inline void Copy_Vec(const float* src, float* dst,int n) {std::copy(src, src + n, dst);}
-
+vector<int> indices_shuffle(int size, std::mt19937& gen);
 
 float MSE(const Mat& Y, const Mat& Z);
 float MAE(const Mat& Y, const Mat& Z);
@@ -211,8 +281,7 @@ float BCE(const Mat& Y, const Mat& P, string regularization, float lambda, const
 float Loss_Cal(const Mat& Y, const Mat& Y_hat, string loss_type);
 
 float CCE(const Mat& Y, const Mat& P, string regularization, float lambda, const Mat& W);
-void FeatureScaling(const Mat& src, Mat& dst, Mat& mean_mat, Mat& std_mat, string loss_type = "standard");
-void FeatureScaling(Mat& dst, Mat& mean_mat, Mat& inv_std_mat);
+void FeatureScaling(const Mat& src, Mat& dst, Mat& mean_mat, Mat& std_mat, bool fit = true);
 void Rescale_Weight(Mat& W, Mat& B, Mat& mean_mat, Mat& inv_std_mat);
 void Rescale_Y(Mat& Y_Pred, Mat& Y_mean, Mat& Y_inv_std);
 
@@ -344,7 +413,7 @@ static time_point<high_resolution_clock> start_timer, stop_timer;
 void StartTimer();
 void StopTimer();
 void PrintTimer();
-void ShowSoftmaxPredict(const Mat& Y_Pred, const Mat& Y_Test);
+void ShowPredict(const Mat& Y_Pred, const Mat& Y_Test, string type);
 int EarlyStop(const Mat& X_Val, const Mat& Y_Val, vector <Mat>& W,vector <Mat>& B, string loss_type , int patience, int epoch);
 
 
@@ -359,5 +428,9 @@ void Train_MLP(const Mat& X, const Mat& Y, vector<Mat>& W, vector<Mat>& B, vecto
      string loss_type, float pkeep, int batch_size);
 void Train_MLP(const Mat& X, const Mat& Y, const Mat& X_Val, const Mat& Y_Val, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate,
      int epochs, Loss_History& history, string loss_type, float pkeep, int batch_size);
+
+
+
+
 
 #endif

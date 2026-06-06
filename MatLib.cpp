@@ -1,11 +1,9 @@
 #include "MatLib.h"
 #include <immintrin.h>
-#include <random>
 #include <utility>
-#include <algorithm>
-#include<fstream>
+#include <fstream>
 #include <cstring>
-
+#include <omp.h>
 Mat::Mat(int row,int col): row(row),col(col),data(row*col,0.0f){}
 float& Mat::operator()(int r, int c){return data[r*col+c];}
 const float& Mat::operator()(int r, int c) const{return data[r*col+c];}
@@ -123,9 +121,6 @@ void Mat::savetxt(const string& filename) const {
         cerr << "Error: Could not open file " << filename << " for writing." << endl;
         return;
     }
-
-    // Ghi kích thước ma trận ở dòng đầu tiên (để sau này loadmat đọc lại được)
-    outfile << row << " " << col << "\n";
 
     // Ghi dữ liệu ma trận, mỗi hàng xuống dòng 1 lần cho dễ đọc bằng mắt thường
     for (int i = 0; i < row; i++) {
@@ -918,6 +913,12 @@ void Sum_Cols(const Mat& src, Mat& dst){
         dst.data[i] = sum_elements(src.data.data() + i * src.col,src.col);
     } 
 }
+vector<int> indices_shuffle(int size, std::mt19937& gen){
+    vector<int> indices(size);
+    for (int i = 0; i < size; i++) indices[i] = i;
+    std::shuffle(indices.begin(), indices.end(), gen);
+    return indices;
+}
 float Precision(float TP, float FP){
     if (TP + FP == 0) return 0.0f;
     else return (float)TP/(TP + FP);
@@ -1090,27 +1091,39 @@ void PrintTimer() {
     auto duration = duration_cast<milliseconds>(stop_timer - start_timer);
     cout << "\nThoi gian thuc thi: " << duration.count() << " ms" << endl;
 }
-void ShowSoftmaxPredict(const Mat& Y_Pred, const Mat& Y_Test){
-    cout << "\nSample  Predicted  Exact  Probabilities:\n";
-	int cnt = 0;
-	for (int i = 0; i < Y_Pred.row; i++) {
-		int pred_class = 0;
-		for (int j = 1; j < Y_Pred.col; j++)
-			if (Y_Pred(i, j) > Y_Pred(i, pred_class)) pred_class = j;
+void ShowPredict(const Mat& Y_Pred, const Mat& Y_Test, string type){
+    if (type == "clf"){
+        cout << "\nSample  Predicted  Exact  Probabilities:\n";
+        int cnt = 0;
+        for (int i = 0; i < Y_Pred.row; i++) {
+            int pred_class = (Y_Pred.col == 1)
+                ? (int)Y_Pred(i, 0)
+                : [&]{ int c=0; for(int j=1;j<Y_Pred.col;j++) if(Y_Pred(i,j)>Y_Pred(i,c)) c=j; return c; }();
 
-		int true_class = 0;
-		for (int j = 1; j < Y_Test.col; j++)
-			if (Y_Test(i, j) > Y_Test(i, true_class)) true_class = j;
-		if (pred_class == true_class) cnt++;
-		cout << "  [" << i << "]  pred=" << pred_class << "  true=" << true_class << "  prob=[";
-		for (int j = 0; j < Y_Pred.col; j++) {
-			cout << fixed << setprecision(3) << Y_Pred(i, j);
-			if (j < Y_Pred.col - 1) cout << ", ";
-		}
-		cout << "]" << (pred_class == true_class ? "  OK" : "  X") << "\n";
-	}
-	cout << "\nCorrect Predictions: " << cnt << "/" << Y_Test.row << " (" << 100.0f * cnt / Y_Test.row << "%)\n";
+            int true_class = (Y_Test.col == 1)
+                ? (int)Y_Test(i, 0)
+                : [&]{ int c=0; for(int j=1;j<Y_Test.col;j++) if(Y_Test(i,j)>Y_Test(i,c)) c=j; return c; }();
+
+            if (pred_class == true_class) cnt++;
+            cout << "  [" << i + 1 << "]  pred=" << pred_class << "  true=" << true_class << "  prob=[";
+            for (int j = 0; j < Y_Pred.col; j++) {
+                cout << fixed << setprecision(3) << Y_Pred(i, j);
+                if (j < Y_Pred.col - 1) cout << ", ";
+            }
+            cout << "]" << (pred_class == true_class ? "  OK" : "  X") << "\n";
+        }
+        cout << "\nCorrect Predictions: " << cnt << "/" << Y_Test.row << " (" << 100.0f * cnt / Y_Test.row << "%)\n";
+    }
+    else if (type == "reg") {
+        cout << "\nSample  Predicted  Exact:\n";
+        for (int i = 0; i < Y_Pred.row; i++) {
+            for (int j = 0; j < Y_Pred.col; j++) {
+                cout << "  [" << i + 1 << "]  pred=" << fixed << setprecision(3) << Y_Pred(i, j) << "  true=" << Y_Test(i, j) << "\n";
+            }
+        }
+    }
 }
+
 int EarlyStop(const Mat& X_Val, const Mat& Y_Val, vector <Mat>& W,vector <Mat>& B, string loss_type, int patience, int epoch){
     static int wait_count = 0;
     static float best_val_loss = 1e9f;
@@ -1148,30 +1161,28 @@ int EarlyStop(const Mat& X_Val, const Mat& Y_Val, vector <Mat>& W,vector <Mat>& 
     }
     return 0;
 }
-void FeatureScaling(const Mat& src, Mat& dst, Mat& mean_mat, Mat& std_mat, string loss_type) {
-    if (&src == &dst) {
-        Mat Temp(src.col, src.row);
-        src.transpose(Temp);
-        dst = Temp;
+void FeatureScaling(const Mat& src, Mat& dst,  Mat& mean_mat, Mat& std_mat, bool fit) {
+    if (fit) {
+        if (&src == &dst) {
+            Mat Temp(src.col, src.row);
+            src.transpose(Temp);
+            dst = Temp;
+        }
+        else {
+            std::swap(dst.row,dst.col);
+            src.transpose(dst);
+        }
+        Mat mean_temp_mat(1, dst.col);
+        for (int i = 0; i < dst.row; i++) {
+            mean_mat(0, i) = mean(&dst(i, 0), dst.col);
+            mean_temp_mat.set_ones(mean_mat(0, i));
+            std_mat(0, i) = sqrt(var(&dst(i, 0), &mean_temp_mat(0, 0), dst.col));
+            std_mat(0, i) = 1.0f / (std_mat(0, i) + 1e-8f);
+        }
+        dst.transpose();
     }
-    else {
-        std::swap(dst.row,dst.col);
-        src.transpose(dst);
-    }
-    Mat mean_temp_mat(1, dst.col);
-    for (int i = 0; i < dst.row; i++) {
-        mean_mat(0, i) = mean(&dst(i, 0), dst.col);
-        mean_temp_mat.set_ones(mean_mat(0, i));
-        std_mat(0, i) = sqrt(var(&dst(i, 0), &mean_temp_mat(0, 0), dst.col));
-        std_mat(0, i) = 1.0f / (std_mat(0, i) + 1e-8f);
-    }
-    dst.transpose();
     dst -= mean_mat;
     Hadamard_Broadcast_Row(dst, std_mat, dst);
-}
-void FeatureScaling(Mat& dst, Mat& mean_mat, Mat& inv_std_mat){
-    dst -= mean_mat;
-    Hadamard_Broadcast_Row(dst, inv_std_mat, dst);
 }
 void Rescale_Weight(Mat& W, Mat& B, Mat& mean_mat, Mat& inv_std_mat){
     W.transpose();
@@ -1526,23 +1537,49 @@ void Train_MLP(const Mat& X, const Mat& Y, const Mat& X_Val, const Mat& Y_Val, v
 }
 
 void MLP::k_fold(const Mat& X, const Mat& Y, int K, bool shuffle, float learning_rate, int epochs) {
-    int fold_size = X.row / K;
+    int N = X.row;
+    int fold_size = N / K;
+
+    // Tạo index [0, 1, 2, ..., N-1]
+    vector<int> indices(N);
+    for (int i = 0; i < N; i++) indices[i] = i;
+
+    // Shuffle index MỘT LẦN duy nhất trước khi chia fold
+    if (shuffle) {
+        static mt19937 rng(chrono::high_resolution_clock::now().time_since_epoch().count());
+        std::shuffle(indices.begin(), indices.end(), rng);
+    }
+
     Mat X_Val(fold_size, X.col), Y_Val(fold_size, Y.col);
-    Mat X_Train(X.row - fold_size, X.col), Y_Train(Y.row - fold_size, Y.col);
+    Mat X_Train((N - fold_size), X.col), Y_Train((N - fold_size), Y.col);
     Loss_History history;
     float avr_point = 0.0f;
+
     for (int k = 0; k < K; k++) {
-        int start_idx;
-        if (shuffle) {
-            start_idx = rand() % X.row;
-            if (start_idx + fold_size > X.row) start_idx = X.row - fold_size;
-        } else {
-            start_idx = k * fold_size;
+        int val_start = k * fold_size;
+        int val_end   = val_start + fold_size; // exclusive
+
+        // --- Copy Val fold ---
+        for (int i = 0; i < fold_size; i++) {
+            int src_row = indices[val_start + i];
+            Copy_Vec(X.data.data() + src_row * X.col,
+                     X_Val.data.data() + i * X.col, X.col);
+            Copy_Vec(Y.data.data() + src_row * Y.col,
+                     Y_Val.data.data() + i * Y.col, Y.col);
         }
-        X_Val.copyfrom(X, "row", start_idx, start_idx + fold_size);
-        Y_Val.copyfrom(Y, "row", start_idx, start_idx + fold_size);
-        X_Train.copyexcept(X, "row", start_idx, start_idx + fold_size);
-        Y_Train.copyexcept(Y, "row", start_idx, start_idx + fold_size);
+
+        // --- Copy Train (tất cả fold còn lại) ---
+        int dst_row = 0;
+        for (int i = 0; i < N; i++) {
+            if (i >= val_start && i < val_end) continue; // bỏ qua val fold
+            int src_row = indices[i];
+            Copy_Vec(X.data.data() + src_row * X.col,
+                     X_Train.data.data() + dst_row * X.col, X.col);
+            Copy_Vec(Y.data.data() + src_row * Y.col,
+                     Y_Train.data.data() + dst_row * Y.col, Y.col);
+            dst_row++;
+        }
+
         this->fit_with_valid(X_Train, Y_Train, X_Val, Y_Val, learning_rate, epochs, history);
         Mat Y_Pred = this->predict(X_Val);
         cout << "\nFold " << k + 1 << endl;
@@ -1551,8 +1588,7 @@ void MLP::k_fold(const Mat& X, const Mat& Y, int K, bool shuffle, float learning
     cout << "\nAverage result: " << avr_point / K << endl;
 }
 
-MLP::MLP(const vector<int>& hidden_nodes, const string& loss_type, const string& regularization,
-         float lambda, float pkeep, int batch_size)
+MLP::MLP(const vector<int>& hidden_nodes, const string& loss_type, float pkeep, int batch_size, const string& regularization, float lambda)
     : hidden_nodes(hidden_nodes), loss_type(loss_type), regularization(regularization),
       lambda(lambda), pkeep(pkeep), batch_size(batch_size), X_mean(1, 0), X_std(1, 0),
       Y_mean(1, 0), Y_std(1, 0) {
@@ -1576,7 +1612,7 @@ void MLP::scale_training_data(const Mat& X, const Mat& Y, Mat& X_scaled, Mat& Y_
     X_scaled = X;
     X_mean = Mat(1, X.col);
     X_std = Mat(1, X.col);
-    FeatureScaling(X, X_scaled, X_mean, X_std, "standard");
+    FeatureScaling(X, X_scaled, X_mean, X_std);
 
     Y_scaled = Y;
     if (loss_type == "MSE" || loss_type == "MAE") {
@@ -1584,8 +1620,8 @@ void MLP::scale_training_data(const Mat& X, const Mat& Y, Mat& X_scaled, Mat& Y_
         Y_std = Mat(1, Y.col);
         FeatureScaling(Y, Y_scaled, Y_mean, Y_std);
     } else {
-        Y_mean = Mat(1, Y.col);
-        Y_std = Mat(1, Y.col);
+        Y_mean = Mat(0, 0);
+        Y_std = Mat(0, 0);
     }
 }
 
@@ -1593,12 +1629,11 @@ void MLP::scale_validation_data(const Mat& X_val, const Mat& Y_val, Mat& X_val_s
                                  Mat& Y_val_scaled) {
     X_val_scaled = X_val;
     if (X_mean.row == 1 && X_mean.col == X_val.col) {
-        FeatureScaling(X_val, X_val_scaled, X_mean, X_std);
+        FeatureScaling(X_val, X_val_scaled, X_mean, X_std, false);
     }
-
     Y_val_scaled = Y_val;
     if ((loss_type == "MSE" || loss_type == "MAE") && Y_mean.row == 1 && Y_mean.col == Y_val.col) {
-        FeatureScaling(Y_val, Y_val_scaled, Y_mean, Y_std);
+        FeatureScaling(Y_val, Y_val_scaled, Y_mean, Y_std, false);
     }
 }
 
@@ -1755,6 +1790,702 @@ float MLP::evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type, floa
     return 0.0f;
 }
 
+float DecisionTree::gini_cal(const vector<int>& count, int total_samples){
+    if (total_samples == 0) return 0.0f;
+    float gini = 1.0f;
+    for (int cnt : count) {
+        float prob = (float)cnt / total_samples;
+        gini -= (prob * prob);
+    }
+    return gini;
+}
+float DecisionTree:: varience_cal(const Mat&Y){
+    float y_mean = mean(Y.data.data(),Y.size());
+    float temp = dist(Y.data.data(), y_mean, Y.size())/ Y.size();
+    return (temp < epsilon) ? 0 : temp;
+}
+float DecisionTree:: gini_cal(const Mat&Y){
+    vector<int> count(num_class,0);
+    for (int i = 0; i < Y.row; i++) count[(int)Y(i,0)]++;
+    float gini = 1.0f;
+    float total_samples = Y.size();
+    for (int x : count) {
+        float prob = x / total_samples;
+        gini -= (prob * prob);
+    }
+    return gini;
+}
+float DecisionTree:: varience_cal(const Mat&Y, vector <int>& sample_indices){
+    float y_mean= 0;
+    for (int i : sample_indices){
+        y_mean += Y(i, 0);
+    }
+    y_mean /= sample_indices.size();
+    float temp = 0;
+    for (int i : sample_indices){
+        temp += (Y(i, 0) - y_mean) * (Y(i, 0) - y_mean);
+    }
+    return (temp < epsilon) ? 0 : temp;
+}
+float DecisionTree:: gini_cal(const Mat&Y, vector <int>& sample_indices){
+    vector<int> count(num_class,0);
+    for (int i : sample_indices) count[(int)Y(i,0)]++;
+    float gini = 1.0f;
+    float total_samples = sample_indices.size();
+    for (int x : count) {
+        float prob = x / total_samples;
+        gini -= (prob * prob);
+    }
+    return gini;
+}
+void DecisionTree:: split_dataset(const Mat& X, const Mat& Y, int split_pos, int feature_idx,
+        float threshold, Mat& X_left, Mat& Y_left, Mat& X_right, Mat& Y_right){
+    int x_row = X.row, x_col = X.col;
+    int y_row = Y.row, y_col = Y.col;
+    int l_row = 0, r_row = 0;
+    X_left = Mat(split_pos + 1, x_col); Y_left = Mat(split_pos + 1, y_col);
+    X_right = Mat(x_row - split_pos - 1, x_col); Y_right = Mat(x_row - split_pos - 1, y_col);
+    for (int i =0;i<x_row;i++){
+        if(X(i,feature_idx) <= threshold){
+            Copy_Vec(X.data.data() + i * x_col, X_left.data.data() + l_row * x_col, x_col);
+            Y_left(l_row++, 0) = Y(i,0);
+        }
+        else {
+            Copy_Vec(X.data.data() + i * x_col, X_right.data.data() + r_row * x_col, x_col);
+            Y_right(r_row++, 0) = Y(i,0);
+        }
+    }
+}
+void DecisionTree:: find_best_split_clf(const Mat& X, const Mat&Y, vector<int>& idx, vector <int>& count_left, vector <int>& count_right,
+             int f, int& best_feature, float& best_threshold, float& best_gini, int& best_split_pos){
+    int N = idx.size();
+    std::sort(idx.begin(), idx.end(), [&X, f](int a, int b) {
+        return X(a,f) < X(b,f);
+    });
+    for (int i : idx) {
+        count_right[Y(i, 0)]++; 
+    }
+    int n_left = 0;
+    int n_right = N;
+    for (int i = 0; i < N - 1; i++) {
+        int label = Y(idx[i], 0);
+
+        // Lệnh cộng trừ lũy kế O(1) thần thánh: Di chuyển 1 phần tử từ Phải sang Trái
+        count_right[label]--;
+        count_left[label]++;
+        
+        n_left++;
+        n_right--;
+
+        // Bỏ qua nếu giá trị của phần tử tiếp theo trùng lặp (tránh cắt ở giữa 2 giá trị bằng nhau)
+        if (X(idx[i],f) == X(idx[i + 1], f)) continue;
+
+        // Tính nhanh Gini của nhát cắt hiện tại mà không cần split data
+        float gini_left = gini_cal(count_left, n_left);
+        float gini_right = gini_cal(count_right, n_right);
+        
+        float gini_split = ((float)n_left / N) * gini_left + ((float)n_right / N) * gini_right;
+
+        // Cập nhật nếu tìm thấy nhát cắt ít vẩn đục hơn
+        if (gini_split < best_gini) {
+            best_gini = gini_split;
+            best_feature = f;
+            // Chọn ngưỡng nằm chính giữa phần tử hiện tại và phần tử tiếp theo
+            best_threshold = (X(idx[i],f) + X(idx[i + 1],f)) / 2.0f; 
+            best_split_pos = i;
+        }
+    }
+}
+void DecisionTree::find_best_split_reg(const Mat& X, const Mat& Y, vector<int>& idx, int f,
+     int& best_feature, float& best_threshold, float& best_variance, int& best_split_pos) {
+    int N = idx.size();
+    std::sort(idx.begin(), idx.end(), [&X, f](int a, int b) { return X(a, f) < X(b, f); });
+
+    // 2. Khởi tạo trạng thái ban đầu (Toàn bộ dữ liệu nằm bên PHẢI)
+    int n_left = 0;
+    int n_right = N;
+    
+    float sum_left = 0.0f;
+    float sum_sq_left = 0.0f;
+    
+    float sum_right = 0.0f;
+    float sum_sq_right = 0.0f;
+
+    // Chạy vòng lặp 1 lần duy nhất để lấy tổng ban đầu cho nhánh Phải
+    for (int i = 0; i < N; i++) {
+        float y_val = Y(idx[i], 0);
+        sum_right += y_val;
+        sum_sq_right += (y_val * y_val);
+    }
+
+    // 3. Quét tịnh tiến O(N)
+    for (int i = 0; i < N - 1; i++) {
+        int current_idx = idx[i];
+        float y_val = Y(current_idx, 0);
+
+        // DỊCH CHUYỂN 1 PHẦN TỬ TỪ PHẢI SANG TRÁI (Chi phí O(1))
+        n_left++;
+        n_right--;
+        
+        sum_left += y_val;
+        sum_right -= y_val;
+        
+        sum_sq_left += (y_val * y_val);
+        sum_sq_right -= (y_val * y_val);
+
+        // Bỏ qua nếu giá trị feature trùng nhau
+        if (X(idx[i], f) == X(idx[i + 1], f)) continue;
+
+        // Tính Variance 2 nhánh siêu tốc bằng công thức biến đổi
+        float mean_left = sum_left / n_left;
+        float var_left = (sum_sq_left / n_left) - (mean_left * mean_left);
+        // Ngăn chặn sai số dấu phẩy động làm variance bị âm tí hon
+        if (var_left < 0.0f) var_left = 0.0f; 
+
+        float mean_right = sum_right / n_right;
+        float var_right = (sum_sq_right / n_right) - (mean_right * mean_right);
+        if (var_right < 0.0f) var_right = 0.0f;
+
+        // Tính Tổng Phương sai có trọng số
+        float variance_split = ((float)n_left / N) * var_left + ((float)n_right / N) * var_right;
+
+        // Cập nhật kỷ lục
+        if (variance_split < best_variance) {
+            best_variance = variance_split;
+            best_feature = f;
+            best_threshold = (X(idx[i], f) + X(idx[i + 1], f)) / 2.0f;
+            best_split_pos = i;
+        }
+    }
+}
+float DecisionTree:: get_majority(const Mat& Y){
+    if (type == "clf"){
+        vector<int> count(num_class,0);
+        for (int i = 0; i < Y.row; i++) count[(int)Y(i,0)]++;
+        int majority_class = 0;
+        for (size_t i = 1; i < count.size(); i++) {
+            if (count[i] > count[majority_class]) majority_class = i;
+        }
+        return (float)majority_class;
+    }
+    else {
+        return mean(Y.data.data(),Y.size());
+    }
+}
+float DecisionTree:: get_majority(const Mat& Y, vector <int>& sample_indices){
+if (type == "clf"){
+        vector<int> count(num_class, 0);
+        for (int idx : sample_indices) count[(int)Y(idx, 0)]++;
+        int majority_class = 0;
+        for (size_t i = 1; i < count.size(); i++) {
+            if (count[i] > count[majority_class]) majority_class = i;
+        }
+        return (float)majority_class;
+    }
+    else {
+        float sum = 0.0f;
+        for(int idx : sample_indices) sum += Y(idx, 0);
+        return sum / sample_indices.size();
+    }
+}
+TreeNode* DecisionTree:: build_tree(const Mat&X, const Mat& Y, int depth){
+    int num_samples = X.row;
+    int num_features = X.col;
+    TreeNode* node = new TreeNode();
+    float current_stop_val;
+    if (type == "clf") current_stop_val = gini_cal(Y);
+    else if (type == "reg") current_stop_val = varience_cal(Y);
+    if (depth >= max_depth || num_samples < min_samples_split || current_stop_val == 0.0f) {
+        node->is_leaf = true;
+        node->leaf_value = get_majority(Y);
+        return node;
+    }
+    float best_gini = numeric_limits<float>::max();
+    int best_feature = -1;
+    float best_threshold = 0.0f;
+    int best_split_pos = 0;
+    vector <int> idx(X.row);
+    for (int i = 0; i < X.row; i++) idx[i] = i;
+    if (type == "clf") {
+        vector <int> count_left(num_class);
+        vector <int> count_right(num_class);
+        for (int f = 0; f < num_features;f++){
+            for (int i = 0; i < num_class;i++){
+                count_left[i] = 0;
+                count_right[i] = 0;
+            }
+            find_best_split_clf(X, Y, idx, count_left, count_right, f, best_feature, best_threshold,
+            best_gini, best_split_pos);        
+        }
+    }
+    else if (type == "reg"){
+        for (int f = 0; f < num_features;f++){
+            find_best_split_reg(X, Y, idx, f, best_feature, best_threshold,
+            best_gini, best_split_pos);        
+        }
+    }
+    if ((best_feature == -1)||fabs(current_stop_val - best_gini) < min_impurity_decrease) {
+        node->is_leaf = true;
+        node->leaf_value = get_majority(Y);
+        return node;
+    }
+    Mat X_left, Y_left, X_right, Y_right;
+    split_dataset(X, Y, best_split_pos, best_feature, best_threshold, X_left, Y_left, X_right, Y_right);
+    node->feature_idx = best_feature;
+    node->threshold = best_threshold;
+    node->left = build_tree(X_left, Y_left, depth + 1);
+    node->right = build_tree(X_right, Y_right, depth + 1);
+    return node;
+}
+float DecisionTree::predict_single(const float* X, TreeNode* node) const{
+    if (node->is_leaf) {
+        return node->leaf_value;
+    }
+    if (X[node->feature_idx] <= node->threshold) {
+        return predict_single(X, node->left);
+    } else {
+        return predict_single(X, node->right);
+    }
+}
+
+void DecisionTree::fit(const Mat& X, const Mat& Y){
+    if (Y.col > 1) {
+        num_class = Y.col;
+        Mat Y_idx(Y.row, 1);
+        for (int i = 0;i < Y.row; i++){
+            for (int j = 0; j < Y.col; j++) {
+                if (Y(i,j) == 1.0f) {
+                    Y_idx(i,0) = (float)j;
+                    break;
+                }
+            }
+        }
+    root = build_tree(X, Y_idx, 0);
+    }
+    else{
+        num_class = (int)*std::max_element(Y.data.begin(), Y.data.end()) + 1;
+        root = build_tree(X, Y, 0);
+    }
+}
+Mat DecisionTree::predict(const Mat& X) const{
+    Mat Y_pred(X.row, 1);
+    for (int i = 0; i < X.row; i++) {
+        Y_pred(i, 0) = predict_single(X.data.data() + i * X.col, root);
+    }
+    return Y_pred;
+}
+float DecisionTree:: predict(const float* X) const{
+    return predict_single(X, root);
+}
+float DecisionTree::evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const {
+    if (type == "clf"){
+    float precision , recall , f1;
+    float macro_precision = 0, macro_recall = 0, macro_f1 = 0;
+    Mat ConfusionMat(Y_pred.col, Y_pred.col);
+    for (int i = 0;i < Y_true.row;i++){
+        int idx_ytrue = -1, idx_yhat = -1;
+        for (int j = 0;j < Y_true.col; j++){
+            if (Y_true(i,j)) idx_ytrue = j;
+            if (Y_pred(i,j)) idx_yhat = j;
+            if (idx_yhat != -1 && idx_ytrue != -1) break;
+        }
+        ConfusionMat(idx_ytrue , idx_yhat)++;
+    }
+        int total_sum = sum_elements(ConfusionMat.data.data(), ConfusionMat.size());
+        Mat soc (1, ConfusionMat.row);Sum_Cols(ConfusionMat,soc);
+        Mat sor (1, ConfusionMat.col);Sum_Rows(ConfusionMat,sor);
+        for (int i = 0; i < ConfusionMat.row; i++){
+            int tp = (int)ConfusionMat(i,i);
+            int fp = sor.data[i] - tp;
+            int fn = soc.data[i] - tp;
+            int tn = total_sum - tp - fp - fn;
+            precision = Precision(tp, fp); macro_precision += precision;
+            recall = Recall(tp, fn); macro_recall += recall;
+            f1 = F1_Score(precision, recall); macro_f1 += f1;
+        }
+        if (eval_type == "precision" ) {
+            cout << "\nMacro Precision: " << (float)macro_precision / ConfusionMat.row << endl; 
+            return (float)macro_precision / ConfusionMat.row;
+        }
+        else if (eval_type == "recall" ) {
+            cout << "\nMacro Recall: " << (float)macro_recall / ConfusionMat.row << endl;
+            return (float)macro_recall / ConfusionMat.row;
+        }
+        else if (eval_type == "f1_score") {
+            cout << "\nMacro F1-Score: " << (float)macro_f1 / ConfusionMat.row << endl;
+            return (float)macro_f1 / ConfusionMat.row;
+        }
+        else return -1e3f;
+    }
+    else if (type == "reg"){
+        if (eval_type == "MAE") {
+            float mae = MAE(Y_true, Y_pred);
+            cout << "Mean Absolute Error: " << mae << endl;
+            return mae;
+        }
+        else if (eval_type == "RMSE") {
+        float rmse = sqrtf(2* MSE(Y_true, Y_pred));
+        cout << "\nRoot Mean Squared Error: " << rmse << endl;
+        return rmse;
+        }
+    }
+    return 0.0f;
+}
+void DecisionTree::evaluate(const Mat& Y_true, const Mat& Y_pred) const {
+    if (type == "clf"){
+        float precision , recall , f1;
+        float macro_precision = 0, macro_recall = 0, macro_f1 = 0;
+        Mat ConfusionMat(Y_pred.col, Y_pred.col);
+        for (int i = 0;i < Y_true.row;i++){
+            int idx_ytrue = -1, idx_yhat = -1;
+            for (int j = 0;j < Y_true.col; j++){
+                if (Y_true(i,j)) idx_ytrue = j;
+                if (Y_pred(i,j)) idx_yhat = j;
+                if (idx_yhat != -1 && idx_ytrue != -1) break;
+            }
+            ConfusionMat(idx_ytrue , idx_yhat)++;
+        }
+        int total_sum = sum_elements(ConfusionMat.data.data(), ConfusionMat.size());
+        Mat soc (1, ConfusionMat.row);Sum_Cols(ConfusionMat,soc);
+        Mat sor (1, ConfusionMat.col);Sum_Rows(ConfusionMat,sor);
+        for (int i = 0; i < ConfusionMat.row; i++){
+            int tp = (int)ConfusionMat(i,i);
+            int fp = sor.data[i] - tp;
+            int fn = soc.data[i] - tp;
+            int tn = total_sum - tp - fp - fn;
+            precision = Precision(tp, fp); macro_precision += precision;
+            recall = Recall(tp, fn); macro_recall += recall;
+            f1 = F1_Score(precision, recall); macro_f1 += f1;
+        }
+            cout << "\nMacro Precision: " << (float)macro_precision / ConfusionMat.row << endl; 
+            cout << "\nMacro Recall: " << (float)macro_recall / ConfusionMat.row << endl;
+            cout << "\nMacro F1-Score: " << (float)macro_f1 / ConfusionMat.row << endl;
+    }
+    else if (type == "reg"){
+        float mse = MSE(Y_true, Y_pred);
+        float mae = MAE(Y_true, Y_pred);
+        cout << "\nRoot Mean Squared Error: " << sqrtf(2* mse) << endl;
+        cout << "Mean Absolute Error: " << mae << endl;
+    }
+}
+void DecisionTree::k_fold(const Mat& X, const Mat& Y, int K, bool shuffle){
+    int N = X.row;
+    int fold_size = N / K;
+
+    vector<int> indices(N);
+    for (int i = 0; i < N; i++) indices[i] = i;
+
+    if (shuffle) {
+        static mt19937 rng(chrono::high_resolution_clock::now().time_since_epoch().count());
+        std::shuffle(indices.begin(), indices.end(), rng);
+    }
+
+    Mat X_Val(fold_size, X.col), Y_Val(fold_size, Y.col);
+    Mat X_Train((N - fold_size), X.col), Y_Train((N - fold_size), Y.col);
+    float avr_score = 0.0f;
+
+    for (int k = 0; k < K; k++) {
+        int val_start = k * fold_size;
+        int val_end   = val_start + fold_size;
+
+        for (int i = 0; i < fold_size; i++) {
+            int src_row = indices[val_start + i];
+            Copy_Vec(X.data.data() + src_row * X.col,
+                     X_Val.data.data() + i * X.col, X.col);
+            Copy_Vec(Y.data.data() + src_row * Y.col,
+                     Y_Val.data.data() + i * Y.col, Y.col);
+        }
+
+        int dst_row = 0;
+        for (int i = 0; i < N; i++) {
+            if (i >= val_start && i < val_end) continue;
+            int src_row = indices[i];
+            Copy_Vec(X.data.data() + src_row * X.col,
+                     X_Train.data.data() + dst_row * X.col, X.col);
+            Copy_Vec(Y.data.data() + src_row * Y.col,
+                     Y_Train.data.data() + dst_row * Y.col, Y.col);
+            dst_row++;
+        }
+
+        fit(X_Train, Y_Train);
+        Mat Y_Pred = predict(X_Val);
+        cout << "\nFold " << k + 1 << endl;
+        avr_score += evaluate(Y_Val, Y_Pred, (type == "clf") ? "f1_score" : "MAE");
+    }
+    cout << "\nAverage K_fold score: " << avr_score / K << endl;
+}
+void DecisionTree:: fit_forest(const Mat& X, const Mat& Y, vector<int>& sample_indices, vector<int>& feature_indices){
+    root = build_forest(X, Y, 0, sample_indices, feature_indices);
+}
+TreeNode* DecisionTree:: build_forest(const Mat&X, const Mat& Y, int depth, vector<int>& sample_indices, vector<int>& feature_indices){
+    int num_samples = sample_indices.size();
+    TreeNode* node = new TreeNode();
+    float current_stop_val;
+    if (type == "clf") current_stop_val = gini_cal(Y, sample_indices);
+    else if (type == "reg") current_stop_val = varience_cal(Y, sample_indices);
+    if (depth >= max_depth || num_samples < min_samples_split || current_stop_val == 0.0f) {
+        node->is_leaf = true;
+        node->leaf_value = get_majority(Y, sample_indices);
+        return node;
+    }
+    float best_gini = numeric_limits<float>::max();
+    int best_feature = -1;
+    float best_threshold = 0.0f;
+    int best_split_pos = 0;
+    if (type == "clf") {
+        vector <int> count_left(num_class);
+        vector <int> count_right(num_class);
+        for (int f : feature_indices){
+            for (int i = 0; i < num_class;i++){
+                count_left[i] = 0;
+                count_right[i] = 0;
+            }
+            find_best_split_clf(X, Y, sample_indices, count_left, count_right, f, best_feature, best_threshold,
+            best_gini, best_split_pos);        
+        }
+    }
+    else if (type == "reg"){
+        for (int f : feature_indices){
+            find_best_split_reg(X, Y, sample_indices, f, best_feature, best_threshold,
+            best_gini, best_split_pos);        
+        }
+    }
+    if ((best_feature == -1)||fabs(current_stop_val - best_gini) < min_impurity_decrease) {
+        node->is_leaf = true;
+        node->leaf_value = get_majority(Y, sample_indices);
+        return node;
+    }
+    node->feature_idx = best_feature;
+    node->threshold = best_threshold;
+    auto it = std::stable_partition(sample_indices.begin(), sample_indices.end(), [&](int idx) {
+        return X(idx, best_feature) <= best_threshold;
+    });
+    std::vector<int> left_indices(sample_indices.begin(), it);
+    std::vector<int> right_indices(it, sample_indices.end());
+    node->left = build_forest(X, Y, depth + 1, left_indices, feature_indices);
+    node->right = build_forest(X, Y, depth + 1, right_indices, feature_indices);
+    return node;
+}
+vector <int> RandomForest::_bootstrap(int num_samples, std::mt19937& gen){
+    std::uniform_int_distribution<> dis(0, num_samples - 1);
+    std::vector<int> indices(num_samples);
+    for (int i = 0; i < num_samples; i++) {
+        indices[i] = dis(gen); // Lấy mẫu có hoàn lại
+    }
+    return indices;
+}
+float RandomForest::predict_single(const float* X) const{
+    if (type == "reg") {
+        // BÀI TOÁN HỒI QUY: Lấy Trung bình cộng câu trả lời của các cây
+        float sum = 0.0f;
+        for (int i = 0; i < num_trees; i++) {
+            sum += forest[i].predict(X);
+        }
+        return sum / num_trees;
+    } else {
+        std::vector<int> votes(num_classes, 0);
+        for (int i = 0; i < num_trees; i++) {
+            int predicted_label = (int)forest[i].predict(X);
+            votes[predicted_label]++;
+        }
+        return std::distance(votes.begin(), std::max_element(votes.begin(), votes.end()));
+    }
+}
+Mat RandomForest:: predict(const Mat& X) const{
+    Mat Y_Pred(X.row, 1);
+    // Bạn cũng có thể song song hóa bước Inference này nếu tập Test có hàng triệu dòng
+    #pragma omp parallel for
+    for (int i = 0; i < X.row; i++) {
+        Y_Pred(i,0) = predict_single(X.data.data() + i * X.col);
+    }
+    return Y_Pred;
+}
+void RandomForest::fit(const Mat& X, const Mat& Y){
+    if (type == "clf") num_features_split = std::max(1, (int)std::sqrt(X.col));
+    else if (type == "reg") num_features_split = std::max(1, X.col / 3);
+    if (Y.col > 1) num_classes = Y.col;
+    else num_classes = (int)*std::max_element(Y.data.begin(), Y.data.end()) + 1;
+    forest.resize(num_trees, DecisionTree(type, max_depth, min_samples_split, num_classes));
+    if (Y.col > 1) {
+        Mat Y_idx(Y.row, 1);
+        for (int i = 0;i < Y.row; i++){
+            for (int j = 0; j < Y.col; j++) {
+                if (Y(i,j) == 1.0f) {
+                    Y_idx(i,0) = (float)j;
+                    break;
+                }
+            }
+        }
+        #pragma omp parallel
+        {
+            std::random_device rd;
+            std::mt19937 thread_gen(std::chrono::high_resolution_clock::now().time_since_epoch().count() ^ omp_get_thread_num());
+            #pragma omp for
+            for (int i = 0; i < num_trees; i++) {
+                // Bước 1: Tạo mảng chỉ số dòng ngẫu nhiên cho cây thứ i
+                std::vector<int> sample_indices = _bootstrap(X.row, thread_gen);
+                std::vector<int> feature_indices = indices_shuffle(X.col, thread_gen);
+                forest[i].fit_forest(X, Y_idx, sample_indices, feature_indices);
+            }
+        }
+    }
+    else{
+        #pragma omp parallel
+        {
+            std::random_device rd;
+            std::mt19937 thread_gen(std::chrono::high_resolution_clock::now().time_since_epoch().count() ^ omp_get_thread_num());
+            #pragma omp for
+            for (int i = 0; i < num_trees; i++) {
+                // Bước 1: Tạo mảng chỉ số dòng ngẫu nhiên cho cây thứ i
+                std::vector<int> sample_indices = _bootstrap(X.row, thread_gen);
+                std::vector<int> feature_indices = indices_shuffle(X.col, thread_gen);
+                forest[i].fit_forest(X, Y, sample_indices, feature_indices);
+            }
+        }
+    }
+}
+void RandomForest::evaluate(const Mat& Y_true, const Mat& Y_pred) const{
+    if (type == "clf"){
+        float precision , recall , f1;
+        float macro_precision = 0, macro_recall = 0, macro_f1 = 0;
+        Mat ConfusionMat(Y_pred.col, Y_pred.col);
+        for (int i = 0;i < Y_true.row;i++){
+            int idx_ytrue = -1, idx_yhat = -1;
+            for (int j = 0;j < Y_true.col; j++){
+                if (Y_true(i,j)) idx_ytrue = j;
+                if (Y_pred(i,j)) idx_yhat = j;
+                if (idx_yhat != -1 && idx_ytrue != -1) break;
+            }
+            ConfusionMat(idx_ytrue , idx_yhat)++;
+        }
+        int total_sum = sum_elements(ConfusionMat.data.data(), ConfusionMat.size());
+        Mat soc (1, ConfusionMat.row);Sum_Cols(ConfusionMat,soc);
+        Mat sor (1, ConfusionMat.col);Sum_Rows(ConfusionMat,sor);
+        for (int i = 0; i < ConfusionMat.row; i++){
+            int tp = (int)ConfusionMat(i,i);
+            int fp = sor.data[i] - tp;
+            int fn = soc.data[i] - tp;
+            int tn = total_sum - tp - fp - fn;
+            precision = Precision(tp, fp); macro_precision += precision;
+            recall = Recall(tp, fn); macro_recall += recall;
+            f1 = F1_Score(precision, recall); macro_f1 += f1;
+        }
+            cout << "\nMacro Precision: " << (float)macro_precision / ConfusionMat.row << endl; 
+            cout << "\nMacro Recall: " << (float)macro_recall / ConfusionMat.row << endl;
+            cout << "\nMacro F1-Score: " << (float)macro_f1 / ConfusionMat.row << endl;
+    }
+    else if (type == "reg"){
+        float mse = MSE(Y_true, Y_pred);
+        float mae = MAE(Y_true, Y_pred);
+        cout << "\nRoot Mean Squared Error: " << sqrtf(2* mse) << endl;
+        cout << "Mean Absolute Error: " << mae << endl;
+    }
+}
+float RandomForest::evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const {
+    if (type == "clf"){
+    float precision , recall , f1;
+    float macro_precision = 0, macro_recall = 0, macro_f1 = 0;
+    Mat ConfusionMat(Y_pred.col, Y_pred.col);
+    for (int i = 0;i < Y_true.row;i++){
+        int idx_ytrue = -1, idx_yhat = -1;
+        for (int j = 0;j < Y_true.col; j++){
+            if (Y_true(i,j)) idx_ytrue = j;
+            if (Y_pred(i,j)) idx_yhat = j;
+            if (idx_yhat != -1 && idx_ytrue != -1) break;
+        }
+        ConfusionMat(idx_ytrue , idx_yhat)++;
+    }
+        int total_sum = sum_elements(ConfusionMat.data.data(), ConfusionMat.size());
+        Mat soc (1, ConfusionMat.row);Sum_Cols(ConfusionMat,soc);
+        Mat sor (1, ConfusionMat.col);Sum_Rows(ConfusionMat,sor);
+        for (int i = 0; i < ConfusionMat.row; i++){
+            int tp = (int)ConfusionMat(i,i);
+            int fp = sor.data[i] - tp;
+            int fn = soc.data[i] - tp;
+            int tn = total_sum - tp - fp - fn;
+            precision = Precision(tp, fp); macro_precision += precision;
+            recall = Recall(tp, fn); macro_recall += recall;
+            f1 = F1_Score(precision, recall); macro_f1 += f1;
+        }
+        if (eval_type == "precision" ) {
+            cout << "\nMacro Precision: " << (float)macro_precision / ConfusionMat.row << endl; 
+            return (float)macro_precision / ConfusionMat.row;
+        }
+        else if (eval_type == "recall" ) {
+            cout << "\nMacro Recall: " << (float)macro_recall / ConfusionMat.row << endl;
+            return (float)macro_recall / ConfusionMat.row;
+        }
+        else if (eval_type == "f1_score") {
+            cout << "\nMacro F1-Score: " << (float)macro_f1 / ConfusionMat.row << endl;
+            return (float)macro_f1 / ConfusionMat.row;
+        }
+        else return -1e3f;
+    }
+    else if (type == "reg"){
+        if (eval_type == "MAE") {
+            float mae = MAE(Y_true, Y_pred);
+            cout << "Mean Absolute Error: " << mae << endl;
+            return mae;
+        }
+        else if (eval_type == "RMSE") {
+        float rmse = sqrtf(2* MSE(Y_true, Y_pred));
+        cout << "\nRoot Mean Squared Error: " << rmse << endl;
+        return rmse;
+        }
+    }
+    return 0.0f;
+}
+void RandomForest::k_fold(const Mat& X, const Mat& Y, int K, bool shuffle){
+    if (type == "clf") num_features_split = std::max(1, (int)std::sqrt(X.col));
+    else if (type == "reg") num_features_split = std::max(1, X.col / 3);
+    if (Y.col > 1) num_classes = Y.col;
+    else num_classes = (int)*std::max_element(Y.data.begin(), Y.data.end()) + 1;
+    forest.resize(num_trees, DecisionTree(type, max_depth, min_samples_split, num_classes));
+    int N = X.row;
+    int fold_size = N / K;
+
+    vector<int> indices(N);
+    for (int i = 0; i < N; i++) indices[i] = i;
+
+    if (shuffle) {
+        static mt19937 rng(chrono::high_resolution_clock::now().time_since_epoch().count());
+        std::shuffle(indices.begin(), indices.end(), rng);
+    }
+
+    Mat X_Val(fold_size, X.col), Y_Val(fold_size, Y.col);
+    Mat X_Train((N - fold_size), X.col), Y_Train((N - fold_size), Y.col);
+    float avr_score = 0.0f;
+
+    for (int k = 0; k < K; k++) {
+        int val_start = k * fold_size;
+        int val_end   = val_start + fold_size;
+
+        for (int i = 0; i < fold_size; i++) {
+            int src_row = indices[val_start + i];
+            Copy_Vec(X.data.data() + src_row * X.col,
+                     X_Val.data.data() + i * X.col, X.col);
+            Copy_Vec(Y.data.data() + src_row * Y.col,
+                     Y_Val.data.data() + i * Y.col, Y.col);
+        }
+
+        int dst_row = 0;
+        for (int i = 0; i < N; i++) {
+            if (i >= val_start && i < val_end) continue;
+            int src_row = indices[i];
+            Copy_Vec(X.data.data() + src_row * X.col,
+                     X_Train.data.data() + dst_row * X.col, X.col);
+            Copy_Vec(Y.data.data() + src_row * Y.col,
+                     Y_Train.data.data() + dst_row * Y.col, Y.col);
+            dst_row++;
+        }
+
+        fit(X_Train, Y_Train);
+        Mat Y_Pred = predict(X_Val);
+        cout << "\nFold " << k + 1 << endl;
+        avr_score += evaluate(Y_Val, Y_Pred, (type == "clf") ? "f1_score" : "MAE");
+    }
+    cout << "\nAverage K_fold score: " << avr_score / K << endl;
+}
 LinearRegression::LinearRegression(const string& loss_type, const string& regularization,
                                    float lambda, int batch_size)
     : loss_type(loss_type), regularization(regularization), lambda(lambda), batch_size(batch_size),
@@ -1767,7 +2498,7 @@ void LinearRegression::fit(const Mat& X, const Mat& Y, float learning_rate, int 
     B.rand();
 
     Mat X_scaled = X;
-    FeatureScaling(X, X_scaled, X_mean, X_std, "standard");
+    FeatureScaling(X, X_scaled, X_mean, X_std);
 
     Mat Y_scaled = Y;
     bool scale_y = (loss_type == "MSE" || loss_type == "MAE");
@@ -1808,7 +2539,7 @@ void LinearRegression::fit_with_valid(const Mat& X, const Mat& Y, const Mat& X_v
     B.rand();
 
     Mat X_scaled = X;
-    FeatureScaling(X, X_scaled, X_mean, X_std, "standard");
+    FeatureScaling(X, X_scaled, X_mean, X_std);
 
     Mat Y_scaled = Y;
     bool scale_y = (loss_type == "MSE" || loss_type == "MAE");
@@ -1932,7 +2663,7 @@ void LogisticRegression::fit(const Mat& X, const Mat& Y, float learning_rate, in
     B.rand();
 
     Mat X_scaled = X;
-    FeatureScaling(X, X_scaled, X_mean, X_std, "standard");
+    FeatureScaling(X, X_scaled, X_mean, X_std);
 
     Mat Y_scaled = Y;
 
@@ -1969,7 +2700,7 @@ void LogisticRegression::fit_with_valid(const Mat& X, const Mat& Y, const Mat& X
     B.rand();
 
     Mat X_scaled = X;
-    FeatureScaling(X, X_scaled, X_mean, X_std, "standard");
+    FeatureScaling(X, X_scaled, X_mean, X_std);
 
     Mat Y_scaled = Y;
 

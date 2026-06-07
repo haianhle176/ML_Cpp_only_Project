@@ -1844,22 +1844,7 @@ float DecisionTree::gini_cal(const vector<int>& count, int total_samples){
     }
     return gini;
 }
-float DecisionTree:: varience_cal(const Mat&Y){
-    float y_mean = mean(Y.data.data(),Y.size());
-    float temp = dist(Y.data.data(), y_mean, Y.size())/ Y.size();
-    return (temp < epsilon) ? 0 : temp;
-}
-float DecisionTree:: gini_cal(const Mat&Y){
-    vector<int> count(num_class,0);
-    for (int i = 0; i < Y.row; i++) count[(int)Y(i,0)]++;
-    float gini = 1.0f;
-    float total_samples = Y.size();
-    for (int x : count) {
-        float prob = x / total_samples;
-        gini -= (prob * prob);
-    }
-    return gini;
-}
+
 float DecisionTree:: varience_cal(const Mat&Y, vector <int>& sample_indices){
     float y_mean= 0;
     for (int i : sample_indices){
@@ -1882,24 +1867,6 @@ float DecisionTree:: gini_cal(const Mat&Y, vector <int>& sample_indices){
         gini -= (prob * prob);
     }
     return gini;
-}
-void DecisionTree:: split_dataset(const Mat& X, const Mat& Y, int split_pos, int feature_idx,
-        float threshold, Mat& X_left, Mat& Y_left, Mat& X_right, Mat& Y_right){
-    int x_row = X.row, x_col = X.col;
-    int y_row = Y.row, y_col = Y.col;
-    int l_row = 0, r_row = 0;
-    X_left = Mat(split_pos + 1, x_col); Y_left = Mat(split_pos + 1, y_col);
-    X_right = Mat(x_row - split_pos - 1, x_col); Y_right = Mat(x_row - split_pos - 1, y_col);
-    for (int i =0;i<x_row;i++){
-        if(X(i,feature_idx) <= threshold){
-            Copy_Vec(X.data.data() + i * x_col, X_left.data.data() + l_row * x_col, x_col);
-            Y_left(l_row++, 0) = Y(i,0);
-        }
-        else {
-            Copy_Vec(X.data.data() + i * x_col, X_right.data.data() + r_row * x_col, x_col);
-            Y_right(r_row++, 0) = Y(i,0);
-        }
-    }
 }
 void DecisionTree:: find_best_split_clf(const Mat& X, const Mat&Y, vector<int>& idx, vector <int>& count_left, vector <int>& count_right,
              int f, int& best_feature, float& best_threshold, float& best_gini, int& best_split_pos){
@@ -2003,15 +1970,6 @@ void DecisionTree::find_best_split_reg(const Mat& X, const Mat& Y, vector<int>& 
         }
     }
 }
-float DecisionTree:: get_majority(const Mat& Y){
-    if (type == "clf"){
-        static vector<int> count(num_class);
-        return Majority_Index(Y.data, count);
-    }
-    else {
-        return mean(Y.data.data(),Y.size());
-    }
-}
 float DecisionTree:: get_majority(const Mat& Y, vector <int>& sample_indices){
 if (type == "clf"){
         static vector<int> count(num_class);
@@ -2022,55 +1980,6 @@ if (type == "clf"){
         for(int idx : sample_indices) sum += Y(idx, 0);
         return sum / sample_indices.size();
     }
-}
-TreeNode* DecisionTree:: build_tree(const Mat&X, const Mat& Y, int depth){
-    int num_samples = X.row;
-    int num_features = X.col;
-    TreeNode* node = new TreeNode();
-    float current_stop_val;
-    if (type == "clf") current_stop_val = gini_cal(Y);
-    else if (type == "reg") current_stop_val = varience_cal(Y);
-    if (depth >= max_depth || num_samples < min_samples_split || current_stop_val == 0.0f) {
-        node->is_leaf = true;
-        node->leaf_value = get_majority(Y);
-        return node;
-    }
-    float best_gini = numeric_limits<float>::max();
-    int best_feature = -1;
-    float best_threshold = 0.0f;
-    int best_split_pos = 0;
-    vector <int> idx(X.row);
-    for (int i = 0; i < X.row; i++) idx[i] = i;
-    if (type == "clf") {
-        vector <int> count_left(num_class);
-        vector <int> count_right(num_class);
-        for (int f = 0; f < num_features;f++){
-            for (int i = 0; i < num_class;i++){
-                count_left[i] = 0;
-                count_right[i] = 0;
-            }
-            find_best_split_clf(X, Y, idx, count_left, count_right, f, best_feature, best_threshold,
-            best_gini, best_split_pos);        
-        }
-    }
-    else if (type == "reg"){
-        for (int f = 0; f < num_features;f++){
-            find_best_split_reg(X, Y, idx, f, best_feature, best_threshold,
-            best_gini, best_split_pos);        
-        }
-    }
-    if ((best_feature == -1)||fabs(current_stop_val - best_gini) < min_impurity_decrease) {
-        node->is_leaf = true;
-        node->leaf_value = get_majority(Y);
-        return node;
-    }
-    Mat X_left, Y_left, X_right, Y_right;
-    split_dataset(X, Y, best_split_pos, best_feature, best_threshold, X_left, Y_left, X_right, Y_right);
-    node->feature_idx = best_feature;
-    node->threshold = best_threshold;
-    node->left = build_tree(X_left, Y_left, depth + 1);
-    node->right = build_tree(X_right, Y_right, depth + 1);
-    return node;
 }
 float DecisionTree::predict_single(const float* X, TreeNode* node) const{
     if (node->is_leaf) {
@@ -2084,6 +1993,10 @@ float DecisionTree::predict_single(const float* X, TreeNode* node) const{
 }
 
 void DecisionTree::fit(const Mat& X, const Mat& Y){
+    vector<int> first_sample_indices(Y.row);
+    for (int i = 0; i < Y.row; i++) first_sample_indices[i] = i;
+    vector<int> first_feature_indices(X.col);
+    for (int i = 0; i < X.col; i++) first_feature_indices[i] = i;
     if (Y.col > 1) {
         num_class = Y.col;
         Mat Y_idx(Y.row, 1);
@@ -2095,11 +2008,30 @@ void DecisionTree::fit(const Mat& X, const Mat& Y){
                 }
             }
         }
-    root = build_tree(X, Y_idx, 0);
+    root = build_tree(X, Y_idx, 0, first_sample_indices, first_feature_indices);
     }
     else{
         num_class = (int)*std::max_element(Y.data.begin(), Y.data.end()) + 1;
-        root = build_tree(X, Y, 0);
+        root = build_tree(X, Y, 0, first_sample_indices, first_feature_indices);
+    }
+}
+void DecisionTree::fit(const Mat& X, const Mat& Y, vector<int>& sample_indices, vector<int>& feature_indices) {
+        if (Y.col > 1) {
+        num_class = Y.col;
+        Mat Y_idx(Y.row, 1);
+        for (int i = 0;i < Y.row; i++){
+            for (int j = 0; j < Y.col; j++) {
+                if (Y(i,j) == 1.0f) {
+                    Y_idx(i,0) = (float)j;
+                    break;
+                }
+            }
+        }
+    root = build_tree(X, Y_idx, 0, sample_indices, feature_indices);
+    }
+    else{
+        num_class = (int)*std::max_element(Y.data.begin(), Y.data.end()) + 1;
+        root = build_tree(X, Y, 0, sample_indices, feature_indices);
     }
 }
 Mat DecisionTree::predict(const Mat& X) const{
@@ -2127,10 +2059,7 @@ void DecisionTree::evaluate(const Mat& Y_true, const Mat& Y_pred) const {
 void DecisionTree::k_fold(const Mat& X, const Mat& Y, int K, string eval_type, bool shuffle){
     K_Fold_Evaluate(this, X, Y, K, shuffle, type, eval_type);
 }
-void DecisionTree:: fit_forest(const Mat& X, const Mat& Y, vector<int>& sample_indices, vector<int>& feature_indices){
-    root = build_forest(X, Y, 0, sample_indices, feature_indices);
-}
-TreeNode* DecisionTree:: build_forest(const Mat&X, const Mat& Y, int depth, vector<int>& sample_indices, vector<int>& feature_indices){
+TreeNode* DecisionTree:: build_tree(const Mat&X, const Mat& Y, int depth, vector<int>& sample_indices, vector<int>& feature_indices){
     int num_samples = sample_indices.size();
     TreeNode* node = new TreeNode();
     float current_stop_val;
@@ -2175,8 +2104,8 @@ TreeNode* DecisionTree:: build_forest(const Mat&X, const Mat& Y, int depth, vect
     });
     std::vector<int> left_indices(sample_indices.begin(), it);
     std::vector<int> right_indices(it, sample_indices.end());
-    node->left = build_forest(X, Y, depth + 1, left_indices, feature_indices);
-    node->right = build_forest(X, Y, depth + 1, right_indices, feature_indices);
+    node->left = build_tree(X, Y, depth + 1, left_indices, feature_indices);
+    node->right = build_tree(X, Y, depth + 1, right_indices, feature_indices);
     return node;
 }
 vector <int> RandomForest::_bootstrap(int num_samples){
@@ -2245,7 +2174,7 @@ void RandomForest::fit(const Mat& X, const Mat& Y){
                 // Bước 1: Tạo mảng chỉ số dòng ngẫu nhiên cho cây thứ i
                 std::vector<int> sample_indices = _bootstrap(X.row);
                 std::vector<int> feature_indices = indices_shuffle(X.col, gen);
-                forest[i].fit_forest(X, Y_idx, sample_indices, feature_indices);
+                forest[i].fit(X, Y_idx, sample_indices, feature_indices);
             }
         }
     }
@@ -2258,7 +2187,7 @@ void RandomForest::fit(const Mat& X, const Mat& Y){
                 // Bước 1: Tạo mảng chỉ số dòng ngẫu nhiên cho cây thứ i
                 std::vector<int> sample_indices = _bootstrap(X.row);
                 std::vector<int> feature_indices = indices_shuffle(X.col, gen);
-                forest[i].fit_forest(X, Y, sample_indices, feature_indices);
+                forest[i].fit(X, Y, sample_indices, feature_indices);
             }
         }
     }

@@ -112,36 +112,28 @@ class DecisionTree : public Model {
         TreeNode* root;
         float epsilon, min_impurity_decrease;
         int num_class;
-        vector<int> sample_indices;
-        vector<int> feature_indices;
-        float gini_cal(const Mat&Y);
-        float varience_cal(const Mat&Y);
         float gini_cal(const Mat&Y, vector <int>& sample_indices);
         float varience_cal(const Mat&Y, vector <int>& sample_indices);
         float gini_cal(const vector<int>& count, int total_samples);
-        void split_dataset(const Mat& X, const Mat& Y, int split_pos, int feature_idx,
-             float threshold, Mat& X_left, Mat& Y_left, Mat& X_right, Mat& Y_right);
         void find_best_split_clf(const Mat& X, const Mat&Y, vector<int>& idx, vector <int>& count_left, vector <int>& count_right,
              int f, int& best_feature, float& best_threshold, float& best_gini, int& best_split_pos);
         void find_best_split_reg(const Mat& X, const Mat& Y, vector<int>& idx, int f, int& best_feature, float& best_threshold,
              float& best_variance, int& best_split_pos);
-        float get_majority(const Mat& Y);
         float get_majority(const Mat& Y, vector <int>& sample_indices);
         float predict_single(const float* X, TreeNode* node) const;
-        TreeNode* build_tree(const Mat&X, const Mat& Y, int depth);
-        TreeNode* build_forest(const Mat&X, const Mat& Y, int depth, vector<int>& sample_indices, vector<int>& feature_indices);
+        TreeNode* build_tree(const Mat&X, const Mat& Y, int depth, vector<int>& sample_indices, vector<int>& feature_indices);
     public:
         DecisionTree(string type, int max_depth = 5, int min_samples_split = 3, int num_class = 0)
         : type(type), max_depth(max_depth), min_samples_split(min_samples_split), root(nullptr),
          epsilon(1e-3), min_impurity_decrease(1e-4), num_class(num_class){}
         void fit(const Mat& X, const Mat& Y) override ;
+        void fit(const Mat& X, const Mat& Y, vector<int>& sample_indices, vector<int>& feature_indices) ;
         Mat predict(const Mat& X) const override;
         void predict(const Mat& X, Mat& Y_pred) const;
         float predict(const float* X) const;
         void evaluate(const Mat& Y_true, const Mat& Y_pred) const;
         float evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const override;
         void k_fold(const Mat& X, const Mat& Y, int K, string eval_type, bool shuffle);
-        void fit_forest(const Mat& X, const Mat& Y, vector<int>& sample_indices, vector<int>& feature_indices);
 };
 
 class RandomForest : public Model{

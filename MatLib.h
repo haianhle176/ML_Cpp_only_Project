@@ -61,15 +61,34 @@ struct TreeNode{
     bool is_leaf;
     TreeNode() : feature_idx(-1), threshold(0.0f), left(nullptr), right(nullptr), leaf_value(-1.0f), is_leaf(false) {}
 };
-
-class Model{
+class StandardScaler{
+    private:
+    Mat Mean;
+    Mat Std;
+    Mat inv_Std;
     public:
-    virtual ~Model() = default;
-    virtual void fit(const Mat& X,const Mat& y) = 0;
-    virtual Mat predict(const Mat& X) const = 0;
-    virtual float evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const;;        
+    void fit_transform(Mat& X);
+    void transform(Mat& X) const;
+    void inverse_transform(Mat& X) const;
+    Mat fit_transform(const Mat& X);
+    Mat transform(const Mat& X) const;
+    Mat inverse_transform(const Mat& X) const;
+    void weight_inverse_transform(Mat& W, Mat& B) ;
 };
-class MLP : public Model {
+class SV_Model{
+    public:
+    virtual ~SV_Model() = default;
+    virtual void fit(const Mat& X,const Mat& Y) = 0;
+    virtual Mat predict(const Mat& X) const = 0;
+    virtual float evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const;        
+};
+class USV_Model{
+    public:
+    virtual ~USV_Model() = default;
+    virtual void fit(const Mat& X) = 0;
+    virtual Mat predict(const Mat& X) const = 0;     
+};
+class MLP : public SV_Model {
 private: 
     vector<Mat> W;
     vector<Mat> B;
@@ -81,8 +100,7 @@ private:
     float lambda;
     float pkeep;
     int batch_size;
-    Mat X_mean, X_std;
-    Mat Y_mean, Y_std;
+    StandardScaler Sx, Sy;
 public:
     float threshold = 0.5f;
     Loss_History history;
@@ -103,8 +121,7 @@ private:
     void scale_validation_data(const Mat& X_val, const Mat& Y_val, Mat& X_val_scaled,
                                Mat& Y_val_scaled);
 };
-
-class DecisionTree : public Model {
+class DecisionTree : public SV_Model {
     private:
         int max_depth;
         int min_samples_split;
@@ -135,8 +152,7 @@ class DecisionTree : public Model {
         float evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const override;
         void k_fold(const Mat& X, const Mat& Y, int K, string eval_type, bool shuffle);
 };
-
-class RandomForest : public Model{
+class RandomForest : public SV_Model{
     private:
         int num_trees;
         int max_depth;
@@ -159,7 +175,7 @@ class RandomForest : public Model{
         void k_fold(const Mat& X, const Mat& Y, int K, string eval_type, bool shuffle);
         void feature_importance(Mat& X, const Mat& Y_true);
 };
-class LinearRegression : public Model {
+class LinearRegression : public SV_Model {
 private:
     Mat W;
     Mat B;
@@ -167,7 +183,7 @@ private:
     string regularization;
     float lambda;
     int batch_size;
-    Mat X_mean, X_std;
+    StandardScaler S;
     float learning_rate;
     int epochs;
 public:
@@ -182,8 +198,7 @@ public:
     void evaluate(const Mat& Y_true, const Mat& Y_pred) const;
     float evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const override;
 };
-
-class LogisticRegression : public Model{
+class LogisticRegression : public SV_Model{
 private:
     Mat W;
     Mat B;
@@ -191,7 +206,7 @@ private:
     string regularization;
     float lambda;
     int batch_size;
-    Mat X_mean, X_std;
+    StandardScaler S;
     float learning_rate;
     int epochs;
 public:
@@ -207,11 +222,10 @@ public:
     void evaluate(const Mat& Y_true, const Mat& Y_pred) const;
     float evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const override;
 };
-
-class KNN : public Model{
+class KNN : public SV_Model{
 private:
     Mat X_train;
-    Mat X_mean, X_std;
+    StandardScaler S;
     Mat Y_train;
     string type;
     int K;
@@ -223,7 +237,13 @@ public:
     void evaluate(const Mat& Y_true, const Mat& Y_pred) const;
     float evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const override;
 };
-
+class KMean : public USV_Model{
+    private:
+    Mat Label;
+    Mat Center;
+    int K;
+    void initial_labels(); 
+};
 void mxm(const Mat& src1, const Mat& src2, Mat& dst);
 void mxm_block_tilt(const Mat& src1, const Mat& src2, Mat& dst);
 void mtxm(const Mat& src1, const Mat& src2, Mat& dst);
@@ -291,7 +311,7 @@ inline void Copy_Vec(const float* src, float* dst,int n) {std::copy(src, src + n
 vector<int> indices_shuffle(int size, std::mt19937& gen);
 float evaluateModel(const Mat& Y_true, const Mat& Y_pred, string eval_type, string type, int num_classes = -1);
 void evaluateModel(const Mat& Y_true, const Mat& Y_pred, string type, int num_classes = -1);
-void K_Fold_Evaluate(Model* ML,const Mat& X, const Mat& Y, int K, bool shuffle, string type, string eval_type);
+void K_Fold_Evaluate(SV_Model* ML,const Mat& X, const Mat& Y, int K, bool shuffle, string type, string eval_type);
 
 float MSE(const Mat& Y, const Mat& Z);
 float MAE(const Mat& Y, const Mat& Z);
@@ -303,9 +323,7 @@ float BCE(const Mat& Y, const Mat& P, string regularization, float lambda, const
 float CCE(const Mat& Y, const Mat& P, string regularization, float lambda, const Mat& W);
 float Loss_Cal(const Mat& Y, const Mat& Y_hat, string loss_type);
 
-void FeatureScaling(const Mat& src, Mat& dst, Mat& mean_mat, Mat& std_mat, bool fit = true);
-void Rescale_Weight(Mat& W, Mat& B, Mat& mean_mat, Mat& inv_std_mat);
-void Rescale_Y(Mat& Y_Pred, Mat& Y_mean, Mat& Y_inv_std);
+
 
 inline void Forward_Pass_ReLU(const Mat& X, const vector<Mat>& W, const vector<Mat>& B, vector<Mat>& Z, vector<Mat>& A, string type){
     for (size_t l = 0; l < W.size(); l++) {
@@ -367,7 +385,7 @@ inline void Forward_Pass_ReLU(const Mat& X, const vector<Mat>& W, const vector<M
         }
     }
 }
-inline void MLP_Test(const Mat& X, const vector<Mat>& W, const vector<Mat>& B, Mat& Y_Pred, string loss_type, Mat &Y_mean, Mat& Y_inv_std){
+inline void MLP_Test(const Mat& X, const vector<Mat>& W, const vector<Mat>& B, Mat& Y_Pred, string loss_type){
     vector<Mat> A(W.size());
     vector<Mat> Z(W.size());
     for (size_t l = 0; l < W.size(); l++) {
@@ -386,7 +404,6 @@ inline void MLP_Test(const Mat& X, const vector<Mat>& W, const vector<Mat>& B, M
             ReLU(Z[l], A[l]);
         }
     }
-    if (loss_type == "MSE" || loss_type == "MAE") Rescale_Y(Y_Pred, Y_mean, Y_inv_std);
 }
 inline void Backward_Pass_ReLU(const Mat& X, const Mat& Y, vector<Mat>& W, vector<Mat>& Z, vector<Mat>& A,vector <Mat>& dA, vector<Mat>& dW, vector<Mat>& dB, string loss_type){
     if (loss_type=="MAE"){
@@ -455,6 +472,7 @@ void Train_MLP(const Mat& X, const Mat& Y, vector<Mat>& W, vector<Mat>& B, vecto
      string loss_type, float pkeep, int batch_size);
 void Train_MLP(const Mat& X, const Mat& Y, const Mat& X_Val, const Mat& Y_Val, vector<Mat>& W, vector<Mat>& B, vector <int> hidden_nodes, float learning_rate,
      int epochs, Loss_History& history, string loss_type, float pkeep, int batch_size);
+
 
 
 

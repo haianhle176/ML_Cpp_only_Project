@@ -1023,7 +1023,7 @@ void evaluateModel(const Mat& Y_true, const Mat& Y_pred, string type, int num_cl
         cout << "Mean Absolute Error: " << mae << endl;
     }
 }
-void K_Fold_Evaluate(Model* ML,const Mat& X, const Mat& Y, int K, bool shuffle, string type, string eval_type){
+void K_Fold_Evaluate(SV_Model* ML,const Mat& X, const Mat& Y, int K, bool shuffle, string type, string eval_type){
     int N = X.row;
     int fold_size = N / K;
 
@@ -1197,10 +1197,8 @@ float VIF_Cal(const float* X_true,const float *X_pred ,float X_mean,int n){
 	return TSS/RSS;
 }
 void VIF(const Mat& X, Mat& VIF_mat){
-    Mat X_scaled(X.row, X.col);
-    Mat global_mean(1, X.col);
-    Mat global_std(1, X.col);
-    FeatureScaling(X, X_scaled, global_mean, global_std);
+    StandardScaler S;
+    Mat X_scaled = S.fit_transform(X);
     Mat X_Mask(X.row, X.col - 1);
     Mat X_Vector(X.row, 1);
     Mat W(X.col - 1, 1);
@@ -1345,47 +1343,7 @@ void shuffleMatrixColumn(Mat& X, int colIndex, std::mt19937& gen) {
         std::swap(X(i,colIndex), X(j, colIndex));
     }
 }
-void FeatureScaling(const Mat& src, Mat& dst,  Mat& mean_mat, Mat& std_mat, bool fit) {
-    if (fit) {
-        if (&src == &dst) {
-            Mat Temp(src.col, src.row);
-            src.transpose(Temp);
-            dst = Temp;
-        }
-        else {
-            std::swap(dst.row,dst.col);
-            src.transpose(dst);
-        }
-        Mat mean_temp_mat(1, dst.col);
-        for (int i = 0; i < dst.row; i++) {
-            mean_mat(0, i) = mean(&dst(i, 0), dst.col);
-            mean_temp_mat.set_ones(mean_mat(0, i));
-            std_mat(0, i) = sqrt(var(&dst(i, 0), &mean_temp_mat(0, 0), dst.col));
-            std_mat(0, i) = 1.0f / (std_mat(0, i) + 1e-8f);
-        }
-        dst.transpose();
-    }
-    dst -= mean_mat;
-    Hadamard_Broadcast_Row(dst, std_mat, dst);
-}
-void Rescale_Weight(Mat& W, Mat& B, Mat& mean_mat, Mat& inv_std_mat){
-    W.transpose();
-    Mat Temp(1, W.row);
-    Hadamard(mean_mat.data.data(), inv_std_mat.data.data(), mean_mat.data.data(), W.col);
-    for (int k = 0;k < W.row; k++) {
-        Temp(0, k) = dot(mean_mat.data.data(), &W(k, 0), W.col);
-    }
-    Hadamard_Broadcast_Row(W, inv_std_mat, W);
-    W.transpose();
-    B -= Temp;
-}
-void Rescale_Y(Mat& Y_Pred, Mat& Y_mean, Mat& Y_inv_std){
-    for (int i = 0; i < Y_Pred.row; i++) {
-        for (int j = 0; j < Y_Pred.col; j++) {
-            Y_Pred(i, j) = (Y_Pred(i, j) / Y_inv_std(0, j)) + Y_mean(0, j); 
-        }
-    }
-}
+
 void Train_LN(const Mat& X, const Mat& Y, Mat& W, Mat& B, float learning_rate, int epochs, Loss_History& history, string loss_type,
      string regularization, float lambda) {
     int x_row = X.row;
@@ -1729,8 +1687,7 @@ MLP::MLP(const vector<int>& hidden_nodes, const string& loss_type, float learnin
      float pkeep, int batch_size, const string& regularization, float lambda)
     : hidden_nodes(hidden_nodes), loss_type(loss_type), learning_rate(learning_rate), epochs(epochs),
       regularization(regularization),
-      lambda(lambda), pkeep(pkeep), batch_size(batch_size), X_mean(1, 0), X_std(1, 0),
-      Y_mean(1, 0), Y_std(1, 0) {
+      lambda(lambda), pkeep(pkeep), batch_size(batch_size){
     int layer_count = static_cast<int>(hidden_nodes.size()) + 1;
     W.resize(layer_count);
     B.resize(layer_count);
@@ -1749,30 +1706,18 @@ void MLP::initialize_weights(int input_dim, int output_dim) {
 
 void MLP::scale_training_data(const Mat& X, const Mat& Y, Mat& X_scaled, Mat& Y_scaled) {
     X_scaled = X;
-    X_mean = Mat(1, X.col);
-    X_std = Mat(1, X.col);
-    FeatureScaling(X, X_scaled, X_mean, X_std);
-
+    Sx.fit_transform(X_scaled);
     Y_scaled = Y;
-    if (loss_type == "MSE" || loss_type == "MAE") {
-        Y_mean = Mat(1, Y.col);
-        Y_std = Mat(1, Y.col);
-        FeatureScaling(Y, Y_scaled, Y_mean, Y_std);
-    } else {
-        Y_mean = Mat(0, 0);
-        Y_std = Mat(0, 0);
-    }
+    if (loss_type == "MSE" || loss_type == "MAE") Sy.fit_transform(Y_scaled);
 }
 
 void MLP::scale_validation_data(const Mat& X_val, const Mat& Y_val, Mat& X_val_scaled,
                                  Mat& Y_val_scaled) {
     X_val_scaled = X_val;
-    if (X_mean.row == 1 && X_mean.col == X_val.col) {
-        FeatureScaling(X_val, X_val_scaled, X_mean, X_std, false);
-    }
+    Sx.transform(X_val_scaled);
     Y_val_scaled = Y_val;
-    if ((loss_type == "MSE" || loss_type == "MAE") && Y_mean.row == 1 && Y_mean.col == Y_val.col) {
-        FeatureScaling(Y_val, Y_val_scaled, Y_mean, Y_std, false);
+    if ((loss_type == "MSE" || loss_type == "MAE")) {
+        Sy.transform(Y_val_scaled);
     }
 }
 
@@ -1789,7 +1734,7 @@ void MLP::fit(const Mat& X, const Mat& Y) {
         Train_MLP(X_scaled, Y_scaled, W, B, hidden_nodes, learning_rate, epochs, history,
                   loss_type, regularization, lambda);
     }
-    Rescale_Weight(W[0] ,B[0], X_mean, X_std);
+    Sx.weight_inverse_transform(W[0] ,B[0]);
 }
 
 void MLP::fit_with_valid(const Mat& X, const Mat& Y, const Mat& X_val, const Mat& Y_val) {
@@ -1806,8 +1751,8 @@ void MLP::fit_with_valid(const Mat& X, const Mat& Y, const Mat& X_val, const Mat
 }
 
 void MLP::predict(const Mat& X, Mat& Y_pred) const {
-    Mat X_scaled = X;
-    MLP_Test(X_scaled, W, B, Y_pred, loss_type, const_cast<Mat&>(Y_mean), const_cast<Mat&>(Y_std));
+    MLP_Test(X, W, B, Y_pred, loss_type);
+    if (loss_type == "MSE" || loss_type == "MAE") Sy.inverse_transform(Y_pred);
 }
 
 Mat MLP::predict(const Mat& X) const {
@@ -2255,18 +2200,15 @@ void RandomForest::feature_importance(Mat& X, const Mat& Y_true){
 }
 LinearRegression::LinearRegression(const string& loss_type,float learning_rate, int epochs,int batch_size, const string& regularization,
                                    float lambda)
-    : loss_type(loss_type), learning_rate(learning_rate), epochs(epochs), regularization(regularization), lambda(lambda), batch_size(batch_size),
-      X_mean(1, 0), X_std(1, 0) {}
+    : loss_type(loss_type), learning_rate(learning_rate), epochs(epochs), regularization(regularization), lambda(lambda), batch_size(batch_size){}
 
 void LinearRegression::fit(const Mat& X, const Mat& Y) {
     W = Mat(X.col, Y.col);
     B = Mat(1, Y.col);
     W.rand();
     B.rand();
-    X_mean = Mat(1, X.col);
-    X_std = Mat(1, X.col);
     Mat X_scaled = X;
-    FeatureScaling(X, X_scaled, X_mean, X_std);
+    S.fit_transform(X_scaled);
 
     if (batch_size > 0 && batch_size < X.row) {
         int n_batches = (X.row + batch_size - 1) / batch_size;
@@ -2300,11 +2242,9 @@ void LinearRegression::fit_with_valid(const Mat& X, const Mat& Y, const Mat& X_v
     B.rand();
 
     Mat X_scaled = X;
-    FeatureScaling(X, X_scaled, X_mean, X_std);
     Mat X_val_scaled = X_val;
-    if (X_mean.row == 1 && X_mean.col == X_val.col) {
-        FeatureScaling(X_val, X_val_scaled, X_mean, X_std);
-    }
+    S.fit_transform(X_scaled);
+    S.transform(X_val_scaled);
 
     int patience = 15;
     int wait = 0;
@@ -2362,9 +2302,7 @@ void LinearRegression::fit_with_valid(const Mat& X, const Mat& Y, const Mat& X_v
 
 void LinearRegression::predict(const Mat& X, Mat& Y_pred) const {
     Mat X_scaled = X;
-    if (X_mean.row == 1 && X_mean.col == X.col) {
-        FeatureScaling(X, X_scaled, const_cast<Mat&>(X_mean), const_cast<Mat&>(X_std));
-    }
+    S.transform(X_scaled);
     mxm(X_scaled, W, Y_pred);
     Y_pred += B;
 }
@@ -2385,20 +2323,15 @@ float LinearRegression::evaluate(const Mat& Y_true, const Mat& Y_pred, string ev
 
 LogisticRegression::LogisticRegression(const string& loss_type, float learning_rate, int epochs, const string& regularization,
                                        float lambda, int batch_size)
-    : loss_type(loss_type), learning_rate(learning_rate), epochs(epochs), regularization(regularization), lambda(lambda), batch_size(batch_size),
-      X_mean(1, 0), X_std(1, 0){}
+    : loss_type(loss_type), learning_rate(learning_rate), epochs(epochs), regularization(regularization), lambda(lambda), batch_size(batch_size){}
 
 void LogisticRegression::fit(const Mat& X, const Mat& Y) {
     W = Mat(X.col, Y.col);
     B = Mat(1, Y.col);
     W.rand();
     B.rand();
-    X_mean = Mat(1, X.col);
-    X_std = Mat(1, X.col);
     Mat X_scaled = X;
-    FeatureScaling(X, X_scaled, X_mean, X_std);
-
-    Mat Y_scaled = Y;
+    S.fit_transform(X_scaled);
 
     if (batch_size > 0 && batch_size < X.row) {
         int n_batches = (X.row + batch_size - 1) / batch_size;
@@ -2412,7 +2345,7 @@ void LogisticRegression::fit(const Mat& X, const Mat& Y) {
             Y_mini[b] = Mat(current_rows, Y.col);
             for (int i = 0; i < current_rows; ++i) {
                 Copy_Vec(X_scaled.data.data() + (start + i) * X.col, X_mini[b].data.data() + i * X.col, X.col);
-                Copy_Vec(Y_scaled.data.data() + (start + i) * Y.col, Y_mini[b].data.data() + i * Y.col, Y.col);
+                Copy_Vec(Y.data.data() + (start + i) * Y.col, Y_mini[b].data.data() + i * Y.col, Y.col);
             }
         }
         for (int epoch = 0; epoch < epochs; ++epoch) {
@@ -2421,7 +2354,7 @@ void LogisticRegression::fit(const Mat& X, const Mat& Y) {
             }
         }
     } else {
-        Train_LG_BIN(X_scaled, Y_scaled, W, B, learning_rate, epochs, history, regularization, lambda);
+        Train_LG_BIN(X_scaled, Y, W, B, learning_rate, epochs, history, regularization, lambda);
     }
 }
 
@@ -2432,16 +2365,9 @@ void LogisticRegression::fit_with_valid(const Mat& X, const Mat& Y, const Mat& X
     B.rand();
 
     Mat X_scaled = X;
-    FeatureScaling(X, X_scaled, X_mean, X_std);
-
-    Mat Y_scaled = Y;
-
+    S.fit_transform(X_scaled);
     Mat X_val_scaled = X_val;
-    if (X_mean.row == 1 && X_mean.col == X_val.col) {
-        FeatureScaling(X_val, X_val_scaled, X_mean, X_std);
-    }
-
-    Mat Y_val_scaled = Y_val;
+    S.transform(X_val_scaled);
 
     int patience = 15;
     int wait = 0;
@@ -2464,7 +2390,7 @@ void LogisticRegression::fit_with_valid(const Mat& X, const Mat& Y, const Mat& X
             Y_mini[b] = Mat(current_rows, Y.col);
             for (int i = 0; i < current_rows; ++i) {
                 Copy_Vec(X_scaled.data.data() + (start + i) * X.col, X_mini[b].data.data() + i * X.col, X.col);
-                Copy_Vec(Y_scaled.data.data() + (start + i) * Y.col, Y_mini[b].data.data() + i * Y.col, Y.col);
+                Copy_Vec(Y.data.data() + (start + i) * Y.col, Y_mini[b].data.data() + i * Y.col, Y.col);
             }
         }
     }
@@ -2475,7 +2401,7 @@ void LogisticRegression::fit_with_valid(const Mat& X, const Mat& Y, const Mat& X
                 Train_LG_BIN(X_mini[b], Y_mini[b], W, B, learning_rate, 1, history, regularization, lambda);
             }
         } else {
-            Train_LG_BIN(X_scaled, Y_scaled, W, B, learning_rate, 1, history, regularization, lambda);
+            Train_LG_BIN(X_scaled, Y, W, B, learning_rate, 1, history, regularization, lambda);
         }
 
         Mat Y_pred_val;
@@ -2499,9 +2425,7 @@ void LogisticRegression::fit_with_valid(const Mat& X, const Mat& Y, const Mat& X
 
 void LogisticRegression::predict(const Mat& X, Mat& Y_pred) const {
     Mat X_scaled = X;
-    if (X_mean.row == 1 && X_mean.col == X.col) {
-        FeatureScaling(X, X_scaled, const_cast<Mat&>(X_mean), const_cast<Mat&>(X_std));
-    }
+    S.transform(X_scaled);
     mxm(X_scaled, W, Y_pred);
     Y_pred += B;
     Sigmoid(Y_pred, Y_pred);
@@ -2531,10 +2455,8 @@ float LogisticRegression::evaluate(const Mat& Y_true, const Mat& Y_pred, string 
 }
 
 void KNN:: fit(const Mat& X, const Mat& Y) {
-    X_train = Mat(X.row, X.col);
-    X_mean = Mat(1, X.col);
-    X_std = Mat(1, X.col);
-    FeatureScaling(X, X_train, X_mean, X_std);
+    X_train = X;
+    S.fit_transform(X_train);
     if (type == "reg"){
         num_classes = 1;
         Y_train = Y; 
@@ -2561,7 +2483,7 @@ void KNN:: fit(const Mat& X, const Mat& Y) {
 Mat KNN:: predict(const Mat& X) const {
     Mat Y_pred (X.row, 1);
     Mat X_scaled = X;
-    FeatureScaling(X, X_scaled, const_cast<Mat&> (X_mean), const_cast<Mat&> (X_std), false);
+    S.transform(X_scaled);
     vector <pair<float, float>> distance(X_train.row);
     if (type == "clf"){
         for (int i = 0;i < X.row;i++){
@@ -2605,4 +2527,67 @@ void KNN::evaluate(const Mat& Y_true, const Mat& Y_pred) const {
 }
 float KNN::evaluate(const Mat& Y_true, const Mat& Y_pred, string eval_type) const {
     return evaluateModel(Y_true, Y_pred, eval_type, type, num_classes);
+}
+void StandardScaler :: fit_transform(Mat& X){
+    Mat temp(1,X.col);
+    Mean = temp; Std = temp; inv_Std = temp;
+    X.transpose();
+    Mat mean_temp(1, X.col);
+    for (int i = 0; i < X.row; i++) {
+            Mean(0, i) = mean(&X(i, 0), X.col);
+            mean_temp.set_ones(Mean(0, i));
+            Std(0, i) = sqrt(var(&X(i, 0), &mean_temp(0, 0), X.col));
+            inv_Std(0, i) = 1.0f / (Std(0, i) + 1e-8f);
+        }
+    X.transpose();
+    X -= Mean;
+    Hadamard_Broadcast_Row(X, inv_Std, X);
+}
+Mat StandardScaler :: fit_transform(const Mat& X){
+    Mat X_Temp(X.col, X.row);
+    Mat temp(1,X.col);
+    Mean = temp; Std = temp; inv_Std = temp;
+    X.transpose(X_Temp);
+    Mat mean_temp(1, X.col);
+    for (int i = 0; i < X_Temp.row; i++) {
+            Mean(0, i) = mean(&X_Temp(i, 0), X_Temp.col);
+            mean_temp.set_ones(Mean(0, i));
+            Std(0, i) = sqrt(var(&X_Temp(i, 0), &mean_temp(0, 0), X_Temp.col));
+            inv_Std(0, i) = 1.0f / (Std(0, i) + 1e-8f);
+        }
+    X_Temp.transpose();
+    X_Temp -= Mean;
+    Hadamard_Broadcast_Row(X_Temp, inv_Std, X_Temp);
+    return X_Temp;
+}
+void StandardScaler:: transform(Mat& X) const{
+    X -= Mean;
+    Hadamard_Broadcast_Row(X, inv_Std, X);
+}
+Mat StandardScaler:: transform(const Mat& X) const{
+    Mat X_Temp = X;
+    X_Temp -= Mean;
+    Hadamard_Broadcast_Row(X_Temp, inv_Std, X_Temp);
+    return X_Temp;
+}
+void StandardScaler::inverse_transform(Mat& X) const{
+    Hadamard_Broadcast_Row(X, Std, X);
+    X+=Mean;
+}
+Mat StandardScaler::inverse_transform(const Mat& X) const {
+    Mat X_temp = X;
+    Hadamard_Broadcast_Row(X_temp, Std, X_temp);
+    X_temp+=Mean;
+    return X_temp;
+}
+void StandardScaler::weight_inverse_transform(Mat& W, Mat& B) {
+    W.transpose();
+    Mat Temp(1, W.row);
+    Hadamard(Mean.data.data(), inv_Std.data.data(), Mean.data.data(), W.col);
+    for (int k = 0;k < W.row; k++) {
+        Temp(0, k) = dot(Mean.data.data(), &W(k, 0), W.col);
+    }
+    Hadamard_Broadcast_Row(W, inv_Std, W);
+    W.transpose();
+    B -= Temp;
 }

@@ -123,7 +123,6 @@ class DecisionTree : public SV_Model {
         int max_depth;
         int min_samples_split;
         string type;
-        TreeNode* root;
         float epsilon, min_impurity_decrease;
         int num_class;
         float gini_cal(const Mat&Y, vector <int>& sample_indices);
@@ -134,9 +133,10 @@ class DecisionTree : public SV_Model {
         void find_best_split_reg(const Mat& X, const Mat& Y, vector<int>& idx, int f, int& best_feature, float& best_threshold,
              float& best_variance, int& best_split_pos);
         float get_majority(const Mat& Y, vector <int>& sample_indices);
-        float predict_single(const float* X, TreeNode* node) const;
         TreeNode* build_tree(const Mat&X, const Mat& Y, int depth, vector<int>& sample_indices, vector<int>& feature_indices);
     public:
+        TreeNode* root;
+        float predict_single(const float* X, TreeNode* node) const;
         DecisionTree(string type, int max_depth = 5, int min_samples_split = 3, int num_class = 0)
         : type(type), max_depth(max_depth), min_samples_split(min_samples_split), root(nullptr),
          epsilon(1e-3), min_impurity_decrease(1e-4), num_class(num_class){}
@@ -157,12 +157,13 @@ class RandomForest : public SV_Model{
         int num_features_split;
         string type;
         int num_classes;
+        bool oob_score;
         vector<DecisionTree> forest;
-        std::mt19937 gen;
-        vector<int> _bootstrap(int num_samples);
+        vector<int> _bootstrap(int num_samples, mt19937& gen);
     public:
-        RandomForest(string type, int num_trees = 100, int max_depth = 10, int min_samples_split = 2)
-        :type(type), num_trees(num_trees), max_depth(max_depth), min_samples_split(min_samples_split){}
+        float oob_score_ = 0.0f;
+        RandomForest(string type, int num_trees = 100, int max_depth = 10, int min_samples_split = 2, bool oob_score = false)
+        :type(type), num_trees(num_trees), max_depth(max_depth), min_samples_split(min_samples_split), oob_score(oob_score){}
         void fit(const Mat& X, const Mat& Y) override;
         Mat predict(const Mat& X) const override;
         void predict(const Mat& X, Mat& Y_pred) const;
@@ -452,6 +453,7 @@ void RandNormal(vector<float>& dst, float mu, float sigma);
 float RandUni(float a,float b);
 void RandBer(vector<float>& dst, float p_keep);
 static time_point<high_resolution_clock> start_timer, stop_timer;
+static std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());
 void StartTimer();
 void StopTimer();
 void PrintTimer();

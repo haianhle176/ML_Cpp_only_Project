@@ -98,7 +98,6 @@ void Mat::row_col_swap(){
 }
 const int Mat::size() const { return data.size(); }
 void Mat::rand(float min_val, float max_val){
-    static std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());
     uniform_real_distribution<float> dis(min_val, max_val);
     int total_size = row * col;
     for (int i = 0; i < total_size; i++) {
@@ -1233,8 +1232,7 @@ void ShowVIF(const Mat& X){
 }
 
 void RandNormal(vector<float>& src, float mu, float sigma){
-    static std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());
-    static std::normal_distribution<float> dis(mu, sigma);
+        static std::normal_distribution<float> dis(mu, sigma);
     dis.param(std::normal_distribution<float>::param_type(mu, sigma));
     int total_size = src.size();
     for (int i = 0; i < total_size; ++i) {
@@ -1242,7 +1240,6 @@ void RandNormal(vector<float>& src, float mu, float sigma){
     }
 }
 void RandBer(vector<float>& dst, float p_keep){
-    static std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());
     uniform_real_distribution<float> dist(0.0f, 1.0f);
     float scale = 1.0f/p_keep;
     for (size_t i = 0; i < dst.size(); ++i) {
@@ -1250,7 +1247,6 @@ void RandBer(vector<float>& dst, float p_keep){
     }
 }
 float RandUni(float a, float b){
-    static std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());
     uniform_real_distribution<float> dis(a, b);
     return dis(gen);
 }
@@ -2022,12 +2018,11 @@ void DecisionTree::k_fold(const Mat& X, const Mat& Y, int K, string eval_type, b
     K_Fold_Evaluate(this, X, Y, K, shuffle, type, eval_type);
 }
 TreeNode* DecisionTree:: build_tree(const Mat&X, const Mat& Y, int depth, vector<int>& sample_indices, vector<int>& feature_indices){
-    int num_samples = sample_indices.size();
     TreeNode* node = new TreeNode();
     float current_stop_val;
     if (type == "clf") current_stop_val = gini_cal(Y, sample_indices);
     else if (type == "reg") current_stop_val = varience_cal(Y, sample_indices);
-    if (depth >= max_depth || num_samples < min_samples_split || current_stop_val == 0.0f) {
+    if (depth >= max_depth || sample_indices.size() < min_samples_split || current_stop_val == 0.0f) {
         node->is_leaf = true;
         node->leaf_value = get_majority(Y, sample_indices);
         return node;
@@ -2070,7 +2065,7 @@ TreeNode* DecisionTree:: build_tree(const Mat&X, const Mat& Y, int depth, vector
     node->right = build_tree(X, Y, depth + 1, right_indices, feature_indices);
     return node;
 }
-vector <int> RandomForest::_bootstrap(int num_samples){
+vector <int> RandomForest::_bootstrap(int num_samples, mt19937& gen){
     std::uniform_int_distribution<> dis(0, num_samples - 1);
     std::vector<int> indices(num_samples);
     for (int i = 0; i < num_samples; i++) {
@@ -2097,7 +2092,6 @@ float RandomForest::predict_single(const float* X) const{
 }
 Mat RandomForest:: predict(const Mat& X) const{
     Mat Y_Pred(X.row, 1);
-    // Bạn cũng có thể song song hóa bước Inference này nếu tập Test có hàng triệu dòng
     #pragma omp parallel for
     for (int i = 0; i < X.row; i++) {
         Y_Pred(i,0) = predict_single(X.data.data() + i * X.col);
@@ -2105,7 +2099,6 @@ Mat RandomForest:: predict(const Mat& X) const{
     return Y_Pred;
 }
 void RandomForest:: predict(const Mat& X, Mat& Y_pred) const{
-    // Bạn cũng có thể song song hóa bước Inference này nếu tập Test có hàng triệu dòng
     #pragma omp parallel for
     for (int i = 0; i < X.row; i++) {
         Y_pred(i,0) = predict_single(X.data.data() + i * X.col);
@@ -2117,8 +2110,9 @@ void RandomForest::fit(const Mat& X, const Mat& Y){
     if (Y.col > 1) num_classes = Y.col;
     else num_classes = (int)*std::max_element(Y.data.begin(), Y.data.end()) + 1;}
     forest.resize(num_trees, DecisionTree(type, max_depth, min_samples_split, num_classes));
+    Mat Y_idx;
     if (Y.col > 1) {
-        Mat Y_idx(Y.row, 1);
+        Y_idx = Mat(Y.row, 1);
         for (int i = 0;i < Y.row; i++){
             for (int j = 0; j < Y.col; j++) {
                 if (Y(i,j) == 1.0f) {
@@ -2127,29 +2121,95 @@ void RandomForest::fit(const Mat& X, const Mat& Y){
                 }
             }
         }
-        #pragma omp parallel
-        {
-            std::random_device rd;
-            std::mt19937 thread_gen(std::chrono::high_resolution_clock::now().time_since_epoch().count() ^ omp_get_thread_num());
-            #pragma omp for
-            for (int i = 0; i < num_trees; i++) {
-                // Bước 1: Tạo mảng chỉ số dòng ngẫu nhiên cho cây thứ i
-                std::vector<int> sample_indices = _bootstrap(X.row);
-                std::vector<int> feature_indices = indices_shuffle(X.col, gen);
-                forest[i].fit(X, Y_idx, sample_indices, feature_indices);
+    }
+    else Y_idx = Y;
+    if (oob_score){
+        if (type == "clf"){
+            int num_threads = omp_get_max_threads();
+            vector <Mat> thread_vote(num_threads, Mat(X.row, num_classes));
+            #pragma omp parallel
+            {    
+                int tid = omp_get_thread_num();
+                std::mt19937 thread_gen(std::chrono::high_resolution_clock::now().time_since_epoch().count() ^ tid);
+                #pragma omp for
+                for (int i = 0; i < num_trees; i++) {
+                    std::vector<int> sample_indices = _bootstrap(X.row, thread_gen);
+                    std::vector<int> feature_indices = indices_shuffle(X.col, thread_gen);
+                    forest[i].fit(X, Y_idx, sample_indices, feature_indices);
+                    vector <bool> oob_idx(X.row, true);
+                    for (int j = 0; j < oob_idx.size(); j++) oob_idx[sample_indices[j]] = false;
+                    for (int j = 0; j < X.row; j++) {
+                        if (oob_idx[j]) {
+                            thread_vote[tid](j,(int)forest[i].predict_single(X.data.data() + j * X.col, forest[i].root)) ++;
+                        }
+                    }
+                }
             }
+            Mat final_oob_vote(X.row, num_classes);
+            for (int i =0; i < num_threads;i++) final_oob_vote += thread_vote[i];
+            int total_vote = 0, temp = 0;
+            int accuracy = 0;
+            for (int i =0;i < X.row; i++){
+                for (int j = 0;j < num_classes;j++) temp += (int)final_oob_vote(i,j);
+                if (temp != 0) total_vote++;
+                auto it = max_element(&final_oob_vote(i, 0), &final_oob_vote(i, num_classes));
+                int pred_class = std::distance(&final_oob_vote(i, 0), it);
+                if ((int)Y_idx(i, 0) == pred_class) accuracy++;
+            }
+            oob_score_ = (float)accuracy/total_vote;
+        }
+        else{
+            int num_threads = omp_get_max_threads();
+            vector <Mat> thread_mean(num_threads, Mat(X.row, 1));
+            vector <vector<float>> thread_count(num_threads,vector<float>(X.row,0));
+            #pragma omp parallel
+            {    
+                int tid = omp_get_thread_num();
+                std::mt19937 thread_gen(std::chrono::high_resolution_clock::now().time_since_epoch().count() ^ tid);
+                #pragma omp for
+                for (int i = 0; i < num_trees; i++) {
+                    std::vector<int> sample_indices = _bootstrap(X.row, thread_gen);
+                    std::vector<int> feature_indices = indices_shuffle(X.col, thread_gen);
+                    forest[i].fit(X, Y_idx, sample_indices, feature_indices);
+                    vector <bool> oob_idx(X.row, true);
+                    for (int j = 0; j < oob_idx.size(); j++) oob_idx[sample_indices[j]] = false;
+                    for (int j = 0; j < X.row; j++) {
+                        if (oob_idx[j]) {
+                            thread_mean[tid](j,0) += forest[i].predict_single(X.data.data() + j * X.col, forest[i].root);
+                            thread_count[tid][j] ++;
+                        }
+                    }
+                }
+            }
+            Mat final_oob_mean(X.row, 1);
+            vector <float> final_count(X.row,0);
+            for (int i =0; i < num_threads;i++) {
+                final_oob_mean += thread_mean[i];
+                vector_add(final_count.data(), thread_count[i].data(), final_count.data(), X.row);
+            }
+            int total_mean = 0;
+            double MAE_val = 0, MSE_val = 0;
+            for (int i = 0 ;i<X.row;i++){
+                if (final_oob_mean(i,0) != 0) {
+                    total_mean++;
+                    final_oob_mean(i,0)/=final_count[i];
+                    MAE_val += fabs(Y_idx(i,0) - final_oob_mean(i,0)); //
+                    MSE_val += MAE_val*MAE_val;
+                }
+            }
+            oob_score_ = MAE_val/total_mean;
         }
     }
     else{
         #pragma omp parallel
         {
-            gen = mt19937(std::chrono::high_resolution_clock::now().time_since_epoch().count() ^ omp_get_thread_num());
+            std::mt19937 thread_gen(std::chrono::high_resolution_clock::now().time_since_epoch().count() ^ omp_get_thread_num());
             #pragma omp for
             for (int i = 0; i < num_trees; i++) {
                 // Bước 1: Tạo mảng chỉ số dòng ngẫu nhiên cho cây thứ i
-                std::vector<int> sample_indices = _bootstrap(X.row);
-                std::vector<int> feature_indices = indices_shuffle(X.col, gen);
-                forest[i].fit(X, Y, sample_indices, feature_indices);
+                std::vector<int> sample_indices = _bootstrap(X.row, thread_gen);
+                std::vector<int> feature_indices = indices_shuffle(X.col, thread_gen);
+                forest[i].fit(X, Y_idx, sample_indices, feature_indices);
             }
         }
     }
@@ -2574,8 +2634,8 @@ void KMeans:: initial_centers(const Mat& X){
                 dist_min[j] = min(dist_min[j], d);
             }
         }
-        auto it = std :: max_element(dist_min.begin(), dist_min.end());
-        int best = std::distance(dist_min.begin(), it);
+        std::discrete_distribution<int> dist_prob(dist_min.begin(), dist_min.end());
+        int best = dist_prob(gen);
         Copy_Vec(&X(best,0), &Center(i,0), X.col);
     }
 }
@@ -2589,7 +2649,7 @@ void KMeans:: fit(const Mat& X) {
     initial_centers(X_scaled);
     vector <pair<float, float>> distance(K);
     vector <int> cnt (K, 0);
-    int epo = 0;
+    int epo = 0, prev_inertia;
     while(epo++ < max_epoch){
         for (int i = 0;i < K;i++) distance[i].second = i;
         for (int i = 0;i < X.row;i++){
@@ -2600,8 +2660,17 @@ void KMeans:: fit(const Mat& X) {
             Label(i, 0) = std::distance(distance.begin(), it);
         }
         if (Prev_Label.data == Label.data) break;
+        if (epo > 20){
+            float inertia = 0;
+            for (int i = 0; i < X.row; i++) inertia += dist(&X_scaled(i, 0), Center(Label(i,0), 0), X_scaled.col);
+            inertia = sqrtf(inertia);
+            if (abs(prev_inertia - inertia) < 1e-4f) break;
+            prev_inertia = inertia;
+        }
+        Temp_Center.set_zeros();
+        fill(cnt.begin(), cnt.end(), 0);
         for (int i = 0; i < X.row; i++){
-            vector_add(&X(i,0), &Temp_Center(Label(i,0),0), &Temp_Center(Label(i,0),0), X.col);
+            vector_add(&X_scaled(i,0), &Temp_Center(Label(i,0),0), &Temp_Center(Label(i,0),0), X_scaled.col);
             cnt[Label(i, 0)]++;
         }
         for (int i = 0;i < K;i++)

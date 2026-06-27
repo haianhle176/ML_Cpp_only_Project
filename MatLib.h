@@ -120,6 +120,7 @@ private:
 };
 class DecisionTree : public SV_Model {
     private:
+        TreeNode* root;
         int max_depth;
         int min_samples_split;
         string type;
@@ -134,9 +135,8 @@ class DecisionTree : public SV_Model {
              float& best_variance, int& best_split_pos);
         float get_majority(const Mat& Y, vector <int>& sample_indices);
         TreeNode* build_tree(const Mat&X, const Mat& Y, int depth, vector<int>& sample_indices, vector<int>& feature_indices);
-    public:
-        TreeNode* root;
         float predict_single(const float* X, TreeNode* node) const;
+    public:
         DecisionTree(string type, int max_depth = 5, int min_samples_split = 3, int num_class = 0)
         : type(type), max_depth(max_depth), min_samples_split(min_samples_split), root(nullptr),
          epsilon(1e-3), min_impurity_decrease(1e-4), num_class(num_class){}

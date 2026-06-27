@@ -847,9 +847,10 @@ float dist(const float* src, const float scalar, int n){
 }
 float norm(const float* src, int n){return sqrtf(dot(src, src, n));}
 float mean(const float* src, int n){return sum_elements(src, n) / n;}
-float var(const float* src, const float* mean_vec, int n){
+float var(const float* src, float mean_vec, int n){
     return dist(src, mean_vec, n) / n;
 }
+
 void Sign_Matrix(const Mat& src, Mat& dst) {
     apply(src, dst, [](float x) { return (float)(x>0) - (float)(x<0); });
 }
@@ -2140,23 +2141,20 @@ void RandomForest::fit(const Mat& X, const Mat& Y){
                     for (int j = 0; j < oob_idx.size(); j++) oob_idx[sample_indices[j]] = false;
                     for (int j = 0; j < X.row; j++) {
                         if (oob_idx[j]) {
-                            thread_vote[tid](j,(int)forest[i].predict_single(X.data.data() + j * X.col, forest[i].root)) ++;
+                            thread_vote[tid](j,(int)forest[i].predict(X.data.data() + j * X.col)) ++;
                         }
                     }
                 }
             }
             Mat final_oob_vote(X.row, num_classes);
             for (int i =0; i < num_threads;i++) final_oob_vote += thread_vote[i];
-            int total_vote = 0, temp = 0;
             int accuracy = 0;
             for (int i =0;i < X.row; i++){
-                for (int j = 0;j < num_classes;j++) temp += (int)final_oob_vote(i,j);
-                if (temp != 0) total_vote++;
                 auto it = max_element(&final_oob_vote(i, 0), &final_oob_vote(i, num_classes));
                 int pred_class = std::distance(&final_oob_vote(i, 0), it);
                 if ((int)Y_idx(i, 0) == pred_class) accuracy++;
             }
-            oob_score_ = (float)accuracy/total_vote;
+            oob_score_ = (float)accuracy/X.row;
         }
         else{
             int num_threads = omp_get_max_threads();
@@ -2175,7 +2173,7 @@ void RandomForest::fit(const Mat& X, const Mat& Y){
                     for (int j = 0; j < oob_idx.size(); j++) oob_idx[sample_indices[j]] = false;
                     for (int j = 0; j < X.row; j++) {
                         if (oob_idx[j]) {
-                            thread_mean[tid](j,0) += forest[i].predict_single(X.data.data() + j * X.col, forest[i].root);
+                            thread_mean[tid](j,0) += forest[i].predict(X.data.data() + j * X.col);
                             thread_count[tid][j] ++;
                         }
                     }
@@ -2187,17 +2185,15 @@ void RandomForest::fit(const Mat& X, const Mat& Y){
                 final_oob_mean += thread_mean[i];
                 vector_add(final_count.data(), thread_count[i].data(), final_count.data(), X.row);
             }
-            int total_mean = 0;
-            double MAE_val = 0, MSE_val = 0;
+            double MAE_val = 0, MSE_val = 0, temp;
             for (int i = 0 ;i<X.row;i++){
-                if (final_oob_mean(i,0) != 0) {
-                    total_mean++;
-                    final_oob_mean(i,0)/=final_count[i];
-                    MAE_val += fabs(Y_idx(i,0) - final_oob_mean(i,0)); //
-                    MSE_val += MAE_val*MAE_val;
-                }
+                final_oob_mean(i,0)/=final_count[i];
+                temp = fabs(Y_idx(i,0) - final_oob_mean(i,0));
+                MAE_val += temp;
+                MSE_val += temp*temp;
             }
-            oob_score_ = MAE_val/total_mean;
+            // oob_score_ = MAE_val/Y_idx.size();
+            oob_score_ = 1.0f -  MSE_val/(Y_idx.size() * var(Y_idx.data.data(), mean(Y_idx.data.data(), Y_idx.size()), Y_idx.size()));
         }
     }
     else{
@@ -2593,11 +2589,9 @@ void StandardScaler :: fit_transform(Mat& X){
     Mat temp(1,X.col);
     Mean = temp; Std = temp; inv_Std = temp;
     X.transpose();
-    Mat mean_temp(1, X.col);
     for (int i = 0; i < X.row; i++) {
             Mean(0, i) = mean(&X(i, 0), X.col);
-            mean_temp.set_ones(Mean(0, i));
-            Std(0, i) = sqrt(var(&X(i, 0), &mean_temp(0, 0), X.col));
+            Std(0, i) = sqrt(var(&X(i, 0), Mean(0, i), X.col));
             inv_Std(0, i) = 1.0f / (Std(0, i) + 1e-8f);
         }
     X.transpose();
